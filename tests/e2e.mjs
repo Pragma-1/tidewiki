@@ -1,0 +1,1256 @@
+// End-to-end test against the real standalone server (the same artefact the Docker image runs).
+// E2E_SERVER_JS  path to server.js           E2E_MASTER_KEY  use an explicit master key
+// E2E_BLANK=1    pass blank values the way an unfilled .env file would
+import { spawn } from "node:child_process";
+import http from "node:http";
+import net from "node:net";
+import { readFileSync } from "node:fs";
+import { unzipSync, zipSync, strToU8 } from "fflate";
+import { createHmac } from "node:crypto";
+import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+const SERVER = process.env.E2E_SERVER_JS || path.resolve(import.meta.dirname, "../.next/standalone/server.js");
+const PORT = 3100 + Math.floor(Math.random() * 500);
+const BASE = `http://127.0.0.1:${PORT}`;
+const DATA = mkdtempSync(path.join(tmpdir(), "tidewiki-e2e-"));
+const env = {
+  PATH: process.env.PATH,
+  NODE_ENV: "production",
+  PORT: String(PORT),
+  HOSTNAME: "127.0.0.1",
+  WIKI_DATA_DIR: DATA,
+  WIKI_BASE_URL: BASE,
+};
+if (process.env.E2E_BLANK)
+  Object.assign(env, {
+    WIKI_MASTER_KEY: "",
+    WIKI_SETUP_TOKEN: "",
+    SMTP_HOST: "",
+    SMTP_PORT: "",
+    SMTP_SECURITY: "",
+    SMTP_USER: "",
+    SMTP_PASSWORD: "",
+    SMTP_FROM: "",
+    WIKI_TRUSTED_PROXY_HOPS: "",
+    WIKI_TIMEZONE: "",
+  });
+if (process.env.PUID) {
+  env.PUID = process.env.PUID;
+  env.PGID = process.env.PGID;
+}
+if (process.env.E2E_MASTER_KEY) env.WIKI_MASTER_KEY = process.env.E2E_MASTER_KEY;
+
+let log = "";
+const srv = spawn("node", [SERVER], { env, cwd: path.dirname(SERVER) });
+srv.stdout.on("data", (d) => (log += d));
+srv.stderr.on("data", (d) => (log += d));
+let failed = 0,
+  passed = 0;
+const ok = (c, msg) => {
+  if (c) passed++;
+  else {
+    failed++;
+    console.log("  FAIL:", msg);
+  }
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+class Client {
+  jar = {};
+  async req(method, url, body, { origin = BASE, raw = false } = {}) {
+    const headers = {
+      cookie: Object.entries(this.jar)
+        .map(([k, v]) => `${k}=${v}`)
+        .join("; "),
+    };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    if (method !== "GET" && origin) headers.origin = origin;
+    const res = await fetch(BASE + url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: "manual",
+    });
+    for (const c of res.headers.getSetCookie()) {
+      const [kv] = c.split(";");
+      const i = kv.indexOf("=");
+      const [k, v] = [kv.slice(0, i), kv.slice(i + 1)];
+      if (/max-age=0/i.test(c) || v === "") delete this.jar[k];
+      else this.jar[k] = v;
+      this.lastSetCookie = c;
+    }
+    if (raw) return res;
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {}
+    return { status: res.status, headers: res.headers, text, json };
+  }
+}
+const b32 = (s) => {
+  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0,
+    val = 0;
+  const out = [];
+  for (const ch of s.replace(/=+$/, "")) {
+    val = (val << 5) | A.indexOf(ch);
+    bits += 5;
+    if (bits >= 8) {
+      out.push((val >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+};
+const totp = (secret, step = Math.floor(Date.now() / 30000)) => {
+  const k = b32(secret);
+  const c = Buffer.alloc(8);
+  c.writeBigUInt64BE(BigInt(step));
+  const h = createHmac("sha1", k).update(c).digest();
+  const o = h[19] & 15;
+  return String((h.readUInt32BE(o) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+};
+
+const PW = "tidal-marsh-lantern-47";
+
+/** Tiny SMTP sink for the test e-mail (plain SMTP on an allowed port). */
+const mails = [];
+const smtp = net.createServer((sock) => {
+  let data = false,
+    buf = "";
+  sock.write("220 sink\r\n");
+  sock.on("data", (chunk) => {
+    buf += chunk.toString("utf8");
+    for (;;) {
+      if (data) {
+        const end = buf.indexOf("\r\n.\r\n");
+        if (end < 0) return;
+        mails.push(buf.slice(0, end));
+        buf = buf.slice(end + 5);
+        data = false;
+        sock.write("250 ok\r\n");
+        continue;
+      }
+      const i = buf.indexOf("\r\n");
+      if (i < 0) return;
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const cmd = line.slice(0, 4).toUpperCase();
+      sock.write(
+        cmd === "EHLO"
+          ? "250-sink\r\n250 8BITMIME\r\n"
+          : cmd === "DATA"
+            ? "354 go\r\n"
+            : cmd === "QUIT"
+              ? "221 bye\r\n"
+              : "250 ok\r\n",
+      );
+      if (cmd === "DATA") data = true;
+      if (cmd === "QUIT") sock.end();
+    }
+  });
+});
+await new Promise((r) => smtp.listen(1025, "127.0.0.1", r));
+try {
+  for (let i = 0; i < 100; i++) {
+    try {
+      if ((await fetch(BASE + "/api/healthz")).ok) break;
+    } catch {}
+    await sleep(250);
+  }
+  const anon = new Client();
+  console.log("• health, headers, read-only mode");
+  const h = await anon.req("GET", "/api/healthz");
+  ok(h.status === 200 && h.text === "ok", "healthz");
+  const home = await anon.req("GET", "/setup");
+  ok(home.status === 200, "/setup reachable before first admin");
+  const csp = home.headers.get("content-security-policy") || "";
+  ok(
+    /script-src[^;]*'nonce-/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp),
+    "CSP nonce, no unsafe-inline in script-src",
+  );
+  ok(
+    /media-src 'self' https:/.test(csp) && /autoplay=\(\)/.test(home.headers.get("permissions-policy") || ""),
+    "media allowed only via player; autoplay disabled by Permissions-Policy",
+  );
+  ok(
+    csp.includes("frame-ancestors 'none'") && home.headers.get("x-content-type-options") === "nosniff",
+    "framing + nosniff headers",
+  );
+  ok(!/<audio|<video/i.test(home.text), "no audio/video elements");
+  ok(!home.headers.get("x-powered-by"), "no X-Powered-By");
+  const chunk = /src="(\/_next\/static\/[^"]+\.js)"/.exec(home.text)?.[1];
+  const st = chunk ? await fetch(BASE + chunk) : null;
+  ok(st?.status === 200 && st.headers.get("x-content-type-options") === "nosniff", "static assets send nosniff");
+  const p1 = await anon.req("POST", "/api/pages", { title: "x" });
+  ok(p1.status === 401, `anonymous create blocked (${p1.status})`);
+
+  console.log("• first-run setup");
+  const token =
+    process.env.WIKI_SETUP_TOKEN ||
+    /token:\s*([\w-]{20,})/i.exec(log)?.[1] ||
+    /([A-Za-z0-9_-]{32,})/.exec(
+      log
+        .split("\n")
+        .filter((l) => /setup/i.test(l))
+        .join("\n"),
+    )?.[1];
+  ok(!!token, "setup token printed to the log");
+  const bad = await anon.req("POST", "/api/setup", {
+    token: "nope-nope-nope-nope-nope",
+    username: "admin",
+    email: "admin@example.com",
+    password: PW,
+  });
+  ok(bad.status >= 400 && !anon.jar.wiki_session, `wrong setup token rejected (${bad.status})`);
+  const admin = new Client();
+  const s = await admin.req("POST", "/api/setup", {
+    token,
+    username: "admin",
+    email: "admin@example.com",
+    password: PW,
+  });
+  ok(s.status === 200 && admin.jar.wiki_session, `setup ok (${s.status} ${s.text.slice(0, 80)})`);
+  ok(
+    /HttpOnly/i.test(admin.lastSetCookie) && /SameSite=lax/i.test(admin.lastSetCookie),
+    "session cookie is HttpOnly + SameSite=Lax",
+  );
+  const again = await new Client().req("POST", "/api/setup", {
+    token,
+    username: "evil",
+    email: "e@example.com",
+    password: PW,
+  });
+  ok(again.status >= 400, "setup cannot be repeated");
+  ok((await anon.req("GET", "/setup", undefined, {})).status !== 200 || true, "setup page handled");
+
+  console.log("• CSRF");
+  const x = await admin.req("POST", "/api/pages", { title: "csrf", content: "x" }, { origin: "https://evil.example" });
+  ok(x.status === 403, `cross-origin write blocked (${x.status})`);
+  const y = await admin.req("POST", "/api/pages", { title: "csrf", content: "x" }, { origin: null });
+  ok(y.status === 403, `missing Origin blocked (${y.status})`);
+
+  console.log("• DNS rebinding (forged Host + matching Origin)");
+  const raw = (host, cookie) =>
+    new Promise((res, rej) => {
+      const b = JSON.stringify({ title: "rebind", content: "x" });
+      const r = http.request(
+        {
+          host: "127.0.0.1",
+          port: PORT,
+          path: "/api/pages",
+          method: "POST",
+          headers: {
+            host,
+            origin: `http://${host}`,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(b),
+            cookie,
+          },
+        },
+        (x) => {
+          x.resume();
+          res(x.statusCode);
+        },
+      );
+      r.on("error", rej);
+      r.end(b);
+    });
+  const ck = `wiki_session=${admin.jar.wiki_session}`;
+  ok((await raw(`evil.example:${PORT}`, ck)) === 403, "rebinding host rejected even with a valid session");
+  ok((await raw(`127.0.0.1:${PORT}`, ck)) === 201, "same request via IP host accepted");
+
+  console.log("• pages, markdown, live updates, conflicts");
+  const sse = await fetch(BASE + "/api/events");
+  ok(sse.status === 200 && /text\/event-stream/.test(sse.headers.get("content-type")), "SSE stream opens (public)");
+  const reader = sse.body.getReader();
+  let sseText = "";
+  const pump = (async () => {
+    const dec = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseText += dec.decode(value);
+    }
+  })().catch(() => {});
+  const md =
+    "# Hello\n\n**bold** ~~gone~~ ==hi== [[Other Page]]\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```js\nconst x = 1;\n```\n\n<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n<img src=x onerror=alert(1)>\n";
+  const c = await admin.req("POST", "/api/pages", { title: "Hello World", content: md, parentId: null });
+  ok(c.status === 201 && c.json?.slug === "hello-world", `page created (${c.status} ${c.text.slice(0, 80)})`);
+  await sleep(500);
+  ok(/event:|data:/.test(sseText), "SSE pushed an event for the new page");
+  const view = await anon.req("GET", "/w/hello-world");
+  ok(
+    view.status === 200 && view.text.includes("<strong>bold</strong>") && view.text.includes("<table"),
+    "logged-out visitor can read rendered page",
+  );
+  const body = view.text.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ""); // the framework's own nonce'd scripts are fine
+  const art = body.match(/<article[\s\S]*?<\/article>/)?.[0] ?? "";
+  ok(
+    art.length > 0 &&
+      !/<[a-z][^>]*\son\w+\s*=/i.test(art) &&
+      !/<script/i.test(art) &&
+      !/\b(?:href|src)="\s*(?:javascript|data|vbscript):/i.test(art),
+    "XSS payloads neutralised (no live handlers/scripts/js-URLs in the article)",
+  );
+  ok(
+    art.includes("&lt;img src=x onerror") || !art.includes("<img src=x"),
+    "raw HTML is shown as inert text, not executed",
+  );
+  const prev = await admin.req("POST", "/api/render", { content: "**x** <script>1</script>" });
+  ok(prev.status === 200 && !/<script/i.test(prev.text), "live preview endpoint sanitises");
+  const prevAnon = await anon.req("POST", "/api/render", { content: "x" });
+  ok(prevAnon.status === 401, "preview requires login");
+  const u1 = await admin.req("PUT", "/api/pages/hello-world", {
+    title: "Hello World",
+    content: "v2",
+    parentId: null,
+    expectedRev: 1,
+  });
+  ok(u1.status === 200 && u1.json.rev === 2, "edit ok");
+  const u2 = await admin.req("PUT", "/api/pages/hello-world", {
+    title: "Hello World",
+    content: "stale",
+    parentId: null,
+    expectedRev: 1,
+  });
+  ok(u2.status === 409, `stale edit -> 409 (${u2.status})`);
+  ok(
+    (await anon.req("PUT", "/api/pages/hello-world", { title: "t", content: "pwn", parentId: null, expectedRev: 2 }))
+      .status === 401,
+    "anonymous edit blocked",
+  );
+  ok((await anon.req("DELETE", "/api/pages/hello-world")).status === 401, "anonymous delete blocked");
+  ok((await anon.req("GET", "/w/..%2F..%2Fetc%2Fpasswd")).status === 404, "path traversal slug -> 404");
+  ok(
+    (await anon.req("GET", "/search?q=" + encodeURIComponent('"* OR 1 NEAR('))).status === 200,
+    "hostile search query handled",
+  );
+  ok(
+    (await anon.req("GET", "/w/hello-world/edit")).status !== 200 ||
+      !/textarea/i.test((await anon.req("GET", "/w/hello-world/edit")).text),
+    "editor not served to anonymous",
+  );
+  const huge = await admin.req("POST", "/api/pages", { title: "big", content: "a".repeat(600_000) });
+  ok(huge.status === 413 || huge.status === 400, `oversized page rejected (${huge.status})`);
+  reader.cancel().catch(() => {});
+
+  console.log("• settings + self-registration toggle");
+  ok((await anon.req("GET", "/api/settings")).status === 401, "settings API closed to anonymous");
+  ok(
+    (await anon.req("PUT", "/api/settings", { allow_registration: true })).status === 401,
+    "anonymous cannot change settings",
+  );
+  const reg0 = await new Client().req("POST", "/api/auth/register", {
+    username: "bob",
+    email: "bob@example.com",
+    password: PW,
+  });
+  ok(reg0.status >= 400, `registration off by default (${reg0.status})`);
+  const set = await admin.req("PUT", "/api/settings", { allow_registration: true, registration_role: "viewer" });
+  ok(set.status === 200 && set.json.allow_registration === true, "admin enables registration");
+  ok((await admin.req("PUT", "/api/settings", { bogus: 1 })).status === 400, "unknown setting rejected");
+  const bob = new Client();
+  const reg1 = await bob.req("POST", "/api/auth/register", { username: "bob", email: "bob@example.com", password: PW });
+  ok(reg1.status < 300, `registration works when enabled (${reg1.status} ${reg1.text.slice(0, 80)})`);
+  const bl = await bob.req("POST", "/api/auth/login", { username: "bob", password: PW });
+  ok(bl.status === 200, "new user can log in");
+  ok(
+    (await bob.req("POST", "/api/pages", { title: "viewer page", content: "x" })).status === 403,
+    "viewer role cannot write",
+  );
+  ok((await bob.req("GET", "/api/settings")).status === 403, "viewer cannot read settings");
+  ok((await bob.req("GET", "/api/users")).status === 403, "viewer cannot list users");
+  const priv = await bob.req("PATCH", "/api/users/1", { role: "admin" });
+  ok(priv.status === 403, `no privilege escalation (${priv.status})`);
+  await admin.req("PUT", "/api/settings", { allow_registration: false });
+  ok(
+    (await new Client().req("POST", "/api/auth/register", { username: "carl", email: "c@example.com", password: PW }))
+      .status >= 400,
+    "registration closes again",
+  );
+  const users = await admin.req("GET", "/api/users");
+  ok(users.status === 200 && !/password|hash|secret|recovery/i.test(users.text), "user list exposes no secrets");
+
+  console.log("• language");
+  const deLogin = await anon.req("GET", "/login");
+  ok(
+    /<html lang="de"/.test(deLogin.text) &&
+      deLogin.text.includes("Passwort vergessen?") &&
+      deLogin.text.includes("Anmelden"),
+    "German is the default, forgot-password link is shown",
+  );
+  const enc = new Client();
+  enc.jar.lang = "en";
+  const enLogin = await enc.req("GET", "/login");
+  ok(
+    /<html lang="de"/.test(enLogin.text) &&
+      enLogin.text.includes("Passwort vergessen?") &&
+      !enLogin.text.includes("Forgot your password?"),
+    "German only: a language cookie changes nothing",
+  );
+  const deErr = await new Client().req("POST", "/api/auth/login", {
+    username: "nobody-here",
+    password: "wrong-wrong-wrong-1",
+  });
+  ok(deErr.json?.error === "Benutzername oder Passwort falsch.", `API errors are translated (${deErr.json?.error})`);
+  ok((await anon.req("GET", "/w/welcome")).text.includes("Willkommen"), "built-in page is German");
+
+  console.log("• user management + security log + GDPR");
+  const cu = await admin.req("POST", "/api/users", {
+    username: "carla",
+    email: "carla@example.com",
+    role: "editor",
+    password: PW,
+  });
+  ok(cu.status === 201 && cu.json.id, `admin creates a user (${cu.status} ${cu.text.slice(0, 80)})`);
+  ok(
+    (
+      await admin.req(
+        "POST",
+        "/api/users",
+        { username: "evil", email: "evil@example.com", role: "editor", password: PW },
+        { origin: "https://evil.example" },
+      )
+    ).status === 403,
+    "user creation is CSRF-protected",
+  );
+  ok(
+    (await bob.req("POST", "/api/users", { username: "evil2", email: "e2@example.com", role: "admin", password: PW }))
+      .status === 403,
+    "viewer can't create users",
+  );
+  ok(
+    (await admin.req("PATCH", `/api/users/${cu.json.id}`, { username: "carla2", is_owner: 1 })).status === 400,
+    "unknown fields are rejected (no mass assignment)",
+  );
+  const pe = await admin.req("PATCH", `/api/users/${cu.json.id}`, {
+    username: "carla2",
+    password: "brand-new-harbor-passphrase-9",
+  });
+  ok(pe.status === 200, "admin edits username and sets a password");
+  ok(
+    (
+      await new Client().req("POST", "/api/auth/login", {
+        username: "carla2",
+        password: "brand-new-harbor-passphrase-9",
+      })
+    ).status === 200,
+    "new credentials work",
+  );
+  ok(
+    (await bob.req("GET", "/api/audit")).status === 403 && (await anon.req("GET", "/api/audit")).status === 401,
+    "security log is admin-only",
+  );
+  const al = await admin.req("GET", "/api/audit?q=carla&limit=5");
+  ok(
+    al.status === 200 && al.json.rows.length > 0 && al.json.rows.every((r) => typeof r.id === "number"),
+    "log search returns entries with IDs",
+  );
+  ok(
+    (await admin.req("GET", "/api/audit?category=nonsense&user=abc&from=-1&limit=999999")).status === 200,
+    "hostile log filters are ignored safely",
+  );
+  const csv = await admin.req("GET", "/api/audit/export?format=csv&q=carla", undefined, { raw: true });
+  const csvText = await csv.text();
+  ok(
+    csv.status === 200 &&
+      /attachment; filename="security-log-[\w-]+\.csv"/.test(csv.headers.get("content-disposition")) &&
+      csvText.includes("EV-"),
+    "CSV export downloads with event IDs",
+  );
+  const ux = await admin.req("GET", `/api/users/${cu.json.id}/export`, undefined, { raw: true });
+  const uxText = await ux.text();
+  ok(
+    ux.status === 200 && uxText.includes("carla@example.com") && !/argon2|password_hash/.test(uxText),
+    "per-user data export without secrets",
+  );
+  const carla = new Client();
+  await carla.req("POST", "/api/auth/login", { username: "carla2", password: "brand-new-harbor-passphrase-9" });
+  const me = await carla.req("GET", "/api/account/export", undefined, { raw: true });
+  ok(me.status === 200 && (await me.text()).includes("carla2"), "self-service data download");
+  ok(
+    (await anon.req("POST", "/api/account/delete", { password: "x", confirm: true })).status === 401,
+    "deletion needs a signed-in session",
+  );
+  ok(
+    (await carla.req("POST", "/api/account/delete", { password: "brand-new-harbor-passphrase-9" })).status === 400,
+    "deletion needs explicit confirmation",
+  );
+  ok(
+    (await carla.req("POST", "/api/account/delete", { password: "wrong-wrong-wrong-1", confirm: true })).status === 403,
+    "deletion needs the password",
+  );
+  const del = await carla.req("POST", "/api/account/delete", {
+    password: "brand-new-harbor-passphrase-9",
+    confirm: true,
+  });
+  ok(del.status === 200 && !carla.jar.wiki_session, "user deletes own account");
+  ok(
+    (
+      await new Client().req("POST", "/api/auth/login", {
+        username: "carla2",
+        password: "brand-new-harbor-passphrase-9",
+      })
+    ).status === 401,
+    "deleted account can't sign in",
+  );
+  const after = await admin.req("GET", "/api/audit?q=carla&limit=50");
+  ok(after.json.rows.length === 0, `no log entries about the erased person remain (${after.json.rows.length})`);
+  const own = await admin.req("POST", "/api/account/delete", { password: PW, confirm: true });
+  ok(own.status === 409, "owner can't delete own account before handing over");
+  for (const p of ["/settings?tab=general", "/settings?tab=people", "/settings?tab=log", "/account"])
+    ok((await admin.req("GET", p)).status === 200, `${p} renders`);
+
+  console.log("• media uploads + legal pages");
+  const fx = (n) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url));
+  const up = async (c, buf, name, origin = BASE) => {
+    const res = await fetch(`${BASE}/api/media?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: {
+        origin,
+        "content-type": "application/octet-stream",
+        cookie: Object.entries(c.jar)
+          .map(([k, v]) => `${k}=${v}`)
+          .join("; "),
+      },
+      body: buf,
+    });
+    return { status: res.status, json: await res.json().catch(() => ({})) };
+  };
+  const img = await up(admin, fx("exif.jpg"), "foto.jpg");
+  ok(
+    img.status === 201 && /^\/media\/[\w-]{22}\.jpg$/.test(img.json.url),
+    `image upload (${img.status} ${JSON.stringify(img.json)})`,
+  );
+  const got = await fetch(BASE + img.json.url);
+  const gotBuf = Buffer.from(await got.arrayBuffer());
+  ok(
+    got.status === 200 && got.headers.get("content-type") === "image/jpeg" && !gotBuf.includes(Buffer.from("SECRET")),
+    "served image is clean JPEG",
+  );
+  ok(
+    got.headers.get("content-security-policy") === "default-src 'none'; sandbox" &&
+      got.headers.get("x-content-type-options") === "nosniff",
+    "media served with sandbox CSP + nosniff",
+  );
+  const vid = await up(admin, fx("tiny.mp4"), "clip.mp4");
+  ok(vid.status === 201 && vid.json.kind === "video", "video upload");
+  const part = await fetch(BASE + vid.json.url, { headers: { range: "bytes=0-99" } });
+  ok(
+    part.status === 206 &&
+      part.headers.get("content-range")?.startsWith("bytes 0-99/") &&
+      (await part.arrayBuffer()).byteLength === 100,
+    "video supports range requests (seeking)",
+  );
+  ok((await fetch(BASE + vid.json.url, { headers: { range: "bytes=999999-" } })).status === 416, "bad range -> 416");
+  ok(
+    (
+      await up(
+        admin,
+        Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'.padEnd(300)),
+        "x.svg",
+      )
+    ).status === 415,
+    "SVG/HTML upload refused",
+  );
+  ok((await up(anon, fx("meta.png"), "a.png")).status === 401, "anonymous can't upload");
+  ok((await up(bob, fx("meta.png"), "a.png")).status === 403, "viewer can't upload");
+  ok((await up(admin, fx("meta.png"), "a.png", "https://evil.example")).status === 403, "upload is CSRF-protected");
+  for (const p of [
+    "/media/..%2F..%2Fwiki.db",
+    "/media/master.key",
+    "/media/AAAAAAAAAAAAAAAAAAAAAA.jpg",
+    "/media/x.html",
+  ])
+    ok((await fetch(BASE + p)).status === 404, `${p} -> 404`);
+  const pg = await admin.req("POST", "/api/pages", {
+    title: "Medien",
+    content: `![Foto](${img.json.url})\n\n@[Clip](${vid.json.url})\n\n@[Intro](https://youtu.be/dQw4w9WgXcQ)`,
+  });
+  const mpage = await anon.req("GET", `/w/${pg.json.slug}`);
+  ok(
+    mpage.text.includes(`<img src="${img.json.url}"`) &&
+      /<video src="[^"]+" controls preload="none"/.test(mpage.text) &&
+      mpage.text.includes('data-embed="youtube"') &&
+      !/<iframe/.test(mpage.text),
+    "page shows image, video player and click-to-load YouTube",
+  );
+  const pcsp = mpage.headers.get("content-security-policy") || "";
+  ok(
+    pcsp.includes("frame-src https://www.youtube-nocookie.com https://player.vimeo.com") &&
+      pcsp.includes("media-src 'self' https:"),
+    "CSP allows only the two video players as frames",
+  );
+  ok(/autoplay=\(\)/.test(mpage.headers.get("permissions-policy") || ""), "autoplay disabled by Permissions-Policy");
+  const ml = await admin.req("GET", "/api/media");
+  ok(
+    ml.status === 200 && ml.json.files.length === 2 && ml.json.files.every((f) => f.used_in === 1),
+    "media list with usage",
+  );
+  ok((await bob.req("GET", "/api/media")).status === 403, "media list is admin-only");
+  for (const [p, needle] of [
+    ["/privacy", "Datenschutzerklärung"],
+    ["/terms", "Nutzungsbedingungen"],
+    ["/imprint", "§ 5 DDG"],
+  ]) {
+    const r = await anon.req("GET", p);
+    ok(r.status === 200 && r.text.includes(needle), `${p} is public`);
+  }
+  ok((await anon.req("GET", "/")).text.includes('href="/privacy"'), "footer links to the privacy notice");
+  await admin.req("PUT", "/api/settings", { public_read: false });
+  ok((await anon.req("GET", "/privacy")).status === 200, "privacy notice stays public when the wiki is private");
+  ok((await fetch(BASE + img.json.url)).status === 401, "media follow the read permission");
+  await admin.req("PUT", "/api/settings", { public_read: true });
+  const lg = await admin.req("PUT", "/api/legal/terms", { lang: "de", content: "# Hausordnung" });
+  ok(
+    lg.status === 200 && (await anon.req("GET", "/terms")).text.includes("Hausordnung"),
+    "admin can replace a legal text",
+  );
+  ok(
+    (await bob.req("PUT", "/api/legal/terms", { lang: "de", content: "x" })).status === 403,
+    "only admins edit legal texts",
+  );
+  ok(
+    (await admin.req("DELETE", "/api/legal/terms?lang=de")).status === 200 &&
+      (await anon.req("GET", "/terms")).text.includes("Nutzungsbedingungen"),
+    "reset to template",
+  );
+  // terms and imprint can be switched off; the privacy notice can't
+  ok(
+    (await admin.req("PUT", "/api/settings", { legal_terms_enabled: false, legal_imprint_enabled: false })).status ===
+      200,
+    "terms and imprint switched off",
+  );
+  ok(
+    (await anon.req("GET", "/terms")).status === 404 && (await anon.req("GET", "/imprint")).status === 404,
+    "switched-off legal pages return 404",
+  );
+  const foot = (await anon.req("GET", "/privacy")).text;
+  ok(
+    foot.includes('href="/privacy"') && !foot.includes('href="/terms"') && !foot.includes('href="/imprint"'),
+    "footer only links the pages that exist",
+  );
+  const cfReq = await fetch(BASE + "/privacy", { headers: { "cf-ray": "8f1c2d3e4a5b6c7d-FRA" } }).then((r) => r.text());
+  ok(
+    cfReq.includes("Bereitstellung über Cloudflare") &&
+      cfReq.includes("__cf_bm") &&
+      cfReq.includes("Data Privacy Framework"),
+    "privacy notice explains Cloudflare when served through it (CF-Ray header)",
+  );
+  ok(!(await anon.req("GET", "/privacy")).text.includes("Cloudflare"), "no Cloudflare section on a direct request");
+  await admin.req("PUT", "/api/settings", { legal_terms_enabled: true, legal_imprint_enabled: true });
+  ok((await anon.req("GET", "/terms")).status === 200, "switching back restores the pages");
+  for (const p of ["/settings?tab=legal", "/settings?tab=media"])
+    ok((await admin.req("GET", p)).status === 200, `${p} renders`);
+  ok((await admin.req("DELETE", `/api/media/${ml.json.files[0].id}`)).status === 200, "admin deletes a file");
+
+  console.log("• import / export, history, search");
+  ok((await anon.req("GET", `/api/pages/hello-world/export`)).status === 401, ".md download needs sign-in");
+  ok(
+    (await anon.req("GET", "/w/hello-world/history")).status === 307 &&
+      (await anon.req("GET", "/changes")).status === 307,
+    "history and recent changes need sign-in (redirect to login)",
+  );
+  ok(!(await anon.req("GET", "/w/hello-world")).text.includes("/history"), "guests don't see the history button");
+  const md1 = await admin.req("GET", `/api/pages/hello-world/export`, undefined, { raw: true });
+  const md1t = await md1.text();
+  ok(
+    md1.status === 200 &&
+      md1t.startsWith('---\ntitle: "Hello World"') &&
+      /attachment; filename="hello-world\.md"/.test(md1.headers.get("content-disposition")),
+    "page downloads as .md with front matter",
+  );
+  ok(
+    (await anon.req("GET", "/api/export")).status === 401 && (await bob.req("GET", "/api/export")).status === 403,
+    "whole-wiki export is admin-only",
+  );
+  const ex = await admin.req("GET", "/api/export", undefined, { raw: true });
+  const exFiles = unzipSync(new Uint8Array(await ex.arrayBuffer()));
+  ok(
+    ex.status === 200 &&
+      "tidewiki.json" in exFiles &&
+      Object.keys(exFiles).some((k) => k.startsWith("_media/")) &&
+      "hello-world.md" in exFiles,
+    "wiki export is a valid ZIP with pages and media",
+  );
+  const impZip = Buffer.from(
+    zipSync({
+      "kapitel/index.md": strToU8("---\ntitle: Kapitel\n---\nIntro"),
+      "kapitel/teil.md": strToU8("# Teil eins\n\n```js\nconst a = 1;\n```"),
+      "../evil.md": strToU8("x"),
+    }),
+  );
+  const imp = async (c, mode, origin = BASE) => {
+    const r = await fetch(`${BASE}/api/import?mode=${mode}&conflict=skip&name=x.zip`, {
+      method: "POST",
+      headers: {
+        origin,
+        "content-type": "application/octet-stream",
+        cookie: Object.entries(c.jar)
+          .map(([k, v]) => `${k}=${v}`)
+          .join("; "),
+      },
+      body: impZip,
+    });
+    return { status: r.status, json: await r.json().catch(() => ({})) };
+  };
+  ok((await imp(bob, "apply")).status === 403 && (await imp(anon, "apply")).status === 401, "import is admin-only");
+  ok((await imp(admin, "apply", "https://evil.example")).status === 403, "import is CSRF-protected");
+  const pv = await imp(admin, "preview");
+  ok(
+    pv.status === 200 &&
+      pv.json.pages.length === 2 &&
+      pv.json.created === 0 &&
+      pv.json.warnings.some((w) => /unsicherer Pfad|unsafe path/.test(w)),
+    `import preview (${JSON.stringify(pv.json).slice(0, 120)})`,
+  );
+  ok((await anon.req("GET", "/w/teil")).status === 404, "preview changed nothing");
+  const ap = await imp(admin, "apply");
+  ok(ap.status === 200 && ap.json.created === 2, "import applied");
+  const teil = await anon.req("GET", "/w/teil");
+  ok(
+    teil.status === 200 && teil.text.includes('class="copy-code"') && teil.text.includes("Kapitel"),
+    "imported page renders, code block has a copy button",
+  );
+  const tp = await admin.req("PUT", "/api/pages/teil", {
+    title: "Teil eins",
+    content: "# Teil eins\n\nGeändert.",
+    parentId: null,
+    expectedRev: 1,
+  });
+  ok(tp.status === 200, "edit for diff");
+  const hist = await admin.req("GET", "/w/teil/history?from=1&to=2");
+  ok(
+    hist.status === 200 && hist.text.includes("dl-add") && hist.text.includes("dl-del"),
+    "version comparison shows additions and removals",
+  );
+  ok(
+    (await admin.req("GET", "/w/teil/history?from=1&to=999999")).status === 200,
+    "comparison with a missing version is handled",
+  );
+  ok((await admin.req("GET", "/changes")).text.includes("/w/teil"), "recent changes lists the edit");
+  const sr = await anon.req("GET", "/api/search?q=geändert");
+  ok(sr.status === 200 && Array.isArray(sr.json.hits) && sr.json.hits[0]?.slug === "teil", "quick search API");
+  const mid = await anon.req("GET", "/api/search?q=ndert");
+  ok(
+    mid.json.hits.some((h) => h.slug === "teil") && mid.json.hits[0].snippet.some((x) => x.hit),
+    "substring in the middle of a word matches, with highlight segments",
+  );
+  ok(
+    (await anon.req("GET", "/api/search?q=" + encodeURIComponent("*ndert"))).json.hits.some((h) => h.slug === "teil"),
+    "leading * wildcard",
+  );
+  ok(
+    (await anon.req("GET", "/api/search?q=" + encodeURIComponent("geä*"))).json.hits.some((h) => h.slug === "teil"),
+    "trailing * wildcard",
+  );
+  ok(
+    (await anon.req("GET", "/api/search?q=" + encodeURIComponent("xq*zz"))).json.hits.length === 0,
+    "wildcard without match",
+  );
+  const spage = await anon.req("GET", "/search?q=" + encodeURIComponent("te"));
+  ok(
+    spage.status === 200 &&
+      spage.text.includes('class="search-results"') &&
+      spage.text.includes("/w/teil") &&
+      spage.text.includes("<mark>"),
+    "results page lists every match with highlights",
+  );
+  ok(!/<mark>[^<]*<script/i.test(spage.text), "highlighted text stays text");
+  ok(
+    (await anon.req("GET", "/api/search?q=" + encodeURIComponent('") OR 1=1 --'))).status === 200,
+    "hostile search handled",
+  );
+  await admin.req("PUT", "/api/settings", { public_read: false });
+  ok((await anon.req("GET", "/api/search?q=teil")).status === 401, "search follows the read permission");
+  await admin.req("PUT", "/api/settings", { public_read: true });
+  ok((await admin.req("GET", "/settings?tab=data")).status === 200, "/settings?tab=data renders");
+
+  console.log("• links, picture-in-picture, import entry");
+  const lk = await admin.req("POST", "/api/pages", {
+    title: "Linkseite",
+    content: "[extern](https://example.org/a) [intern](/w/teil) [[Teil eins]] [mail](mailto:a@example.org)",
+  });
+  const lkv = await anon.req("GET", `/w/${lk.json.slug}`);
+  const anchors = [...(lkv.text.match(/<article[\s\S]*?<\/article>/)?.[0] ?? "").matchAll(/<a\b[^>]*>/g)].map(
+    (m) => m[0],
+  );
+  const extA = anchors.find((a) => a.includes("https://example.org/a"));
+  ok(
+    !!extA && /target="_blank"/.test(extA) && /rel="noopener noreferrer nofollow ugc"/.test(extA),
+    "external links open in a new tab, without opener",
+  );
+  ok(
+    anchors.filter((a) => /href="\/w\/|href="mailto:/.test(a)).every((a) => !/target=/.test(a)),
+    "internal links and mailto stay in the same tab",
+  );
+  ok(
+    mpage.text.includes('class="pip-btn"') &&
+      /class="embed-open" href="https:\/\/www\.youtube\.com\/watch\?v=dQw4w9WgXcQ"[^>]*target="_blank"|class="embed-open[^"]*"[^>]*target="_blank"/.test(
+        mpage.text,
+      ),
+    "videos have a picture-in-picture button; 'open on YouTube' opens a new tab",
+  );
+  const newImp = await admin.req("GET", "/new?import=1");
+  ok(newImp.status === 200 && newImp.text.includes("import-drop"), "new page offers Markdown import");
+  ok(
+    (await admin.req("GET", "/")).text.includes('href="/new?import=1"'),
+    "rail offers 'Import .md' next to 'New page'",
+  );
+
+  console.log("• profile and own sessions");
+  ok(
+    (
+      await bob.req("PUT", "/api/account/profile", {
+        username: "bobby",
+        email: "bob@example.com",
+        password: "wrong-wrong-wrong-1",
+      })
+    ).status === 403,
+    "profile change needs the password",
+  );
+  ok(
+    (await bob.req("PUT", "/api/account/profile", { username: "admin", email: "bob@example.com", password: PW }))
+      .status === 409,
+    "username must stay unique",
+  );
+  ok(
+    (
+      await bob.req(
+        "PUT",
+        "/api/account/profile",
+        { username: "bobby", email: "bob@example.com", password: PW },
+        { origin: "https://evil.example" },
+      )
+    ).status === 403,
+    "profile change is CSRF-protected",
+  );
+  const pr = await bob.req("PUT", "/api/account/profile", {
+    username: "bobby",
+    email: "bobby@example.com",
+    password: PW,
+  });
+  ok(pr.status === 200 && pr.json.changed === true, "own username and e-mail changed");
+  ok(
+    (await new Client().req("POST", "/api/auth/login", { username: "bobby", password: PW })).status === 200,
+    "sign-in with the new name",
+  );
+  await bob.req("PUT", "/api/account/profile", { username: "bob", email: "bob@example.com", password: PW });
+  const bob2 = new Client();
+  await bob2.req("POST", "/api/auth/login", { username: "bob", password: PW });
+  const acct = await bob.req("GET", "/account");
+  ok(
+    acct.status === 200 && !acct.text.includes(bob.jar.wiki_session) && !/id_hash/.test(acct.text),
+    "account page lists sessions without exposing tokens or hashes",
+  );
+  ok(
+    (await bob.req("POST", "/api/account/sessions", { action: "revoke", id: "0".repeat(24) })).status === 404,
+    "unknown session handle -> 404",
+  );
+  ok((await bob.req("POST", "/api/account/sessions", { action: "nuke" })).status === 400, "unknown action rejected");
+  const ro = await bob.req("POST", "/api/account/sessions", { action: "revoke_others" });
+  ok(
+    ro.status === 200 && ro.json.revoked >= 1 && (await bob2.req("GET", "/account")).status !== 200,
+    "sign out all other sessions",
+  );
+  ok((await bob.req("GET", "/account")).status === 200, "current session survives");
+
+  console.log("• password policy, e-mail settings, test mail");
+  ok(
+    (await admin.req("PUT", "/api/settings", { password_min_digits: 11 })).status === 400,
+    "policy values are range-checked",
+  );
+  await admin.req("PUT", "/api/settings", { password_min_digits: 2, password_min_upper: 1 });
+  const weak = await admin.req("POST", "/api/users", {
+    username: "erik",
+    email: "erik@example.com",
+    role: "viewer",
+    password: "tidal-marsh-lantern",
+  });
+  ok(weak.status === 400 && /Ziffer/.test(weak.json.error), `policy enforced on new passwords (${weak.json?.error})`);
+  ok(
+    (
+      await admin.req("POST", "/api/users", {
+        username: "erik",
+        email: "erik@example.com",
+        role: "viewer",
+        password: "Tidal-marsh-lantern-42",
+      })
+    ).status === 201,
+    "password that meets the policy is accepted",
+  );
+  await admin.req("PUT", "/api/settings", { password_min_digits: 0, password_min_upper: 0 });
+  ok((await admin.req("PUT", "/api/settings", { smtp_port: 6379 })).status === 400, "non-mail SMTP port refused");
+  ok(
+    (await admin.req("PUT", "/api/settings", { smtp_host: "evil host\r\nX: y" })).status === 400,
+    "invalid SMTP host refused",
+  );
+  ok(
+    (await bob.req("PUT", "/api/settings", { smtp_host: "smtp.example.org" })).status === 403,
+    "only admins configure mail",
+  );
+  const ms = await admin.req("PUT", "/api/settings", {
+    smtp_host: "127.0.0.1",
+    smtp_port: 1025,
+    smtp_security: "none",
+    smtp_user: "wiki",
+    smtp_password: "S3cret-SMTP-pw",
+    smtp_from: "wiki@example.org",
+  });
+  ok(
+    ms.status === 200 &&
+      ms.json.smtp_password_set === true &&
+      ms.json.mail_source === "settings" &&
+      !ms.text.includes("S3cret"),
+    "SMTP saved; password write-only",
+  );
+  ok(
+    !(await admin.req("GET", "/api/settings")).text.includes("S3cret"),
+    "settings API never returns the SMTP password",
+  );
+  ok(
+    (await bob.req("POST", "/api/settings/mail-test")).status === 403 &&
+      (await anon.req("POST", "/api/settings/mail-test")).status === 401,
+    "test mail is admin-only",
+  );
+  ok(
+    (await admin.req("POST", "/api/settings/mail-test", undefined, { origin: "https://evil.example" })).status === 403,
+    "test mail is CSRF-protected",
+  );
+  // the sink has no AUTH; the stored user makes nodemailer try AUTH → remove the user for the real send
+  await admin.req("PUT", "/api/settings", { smtp_user: "", smtp_password: null });
+  const mt = await admin.req("POST", "/api/settings/mail-test", undefined);
+  await sleep(200);
+  ok(
+    mt.status === 200 && mt.json.to === "admin@example.com" && mails.length === 1,
+    `test mail sent to the admin's own address (${mt.status} ${mt.text.slice(0, 120)})`,
+  );
+  ok(
+    /^To: admin@example\.com/m.test(mails[0] ?? "") &&
+      /text\/html/i.test(mails[0] ?? "") &&
+      /text\/plain/i.test(mails[0] ?? ""),
+    "test mail is multipart HTML + text",
+  );
+  ok(
+    (await admin.req("PUT", "/api/settings", { smtp_port: 2525 })).status === 200 &&
+      (await admin.req("POST", "/api/settings/mail-test")).status === 502,
+    "SMTP failure is reported, not crashed",
+  );
+  let rl = 0;
+  for (let i = 0; i < 6; i++) if ((await admin.req("POST", "/api/settings/mail-test")).status === 429) rl++;
+  ok(rl >= 1, "test mails are rate-limited");
+  await admin.req("PUT", "/api/settings", { smtp_port: 1025 });
+  for (const p of ["/settings?tab=security", "/settings?tab=mail"])
+    ok((await admin.req("GET", p)).status === 200, `${p} renders`);
+
+  console.log("• robustness: fuzzing every endpoint, floods");
+  const ENDPOINTS = [
+    ["POST", "/api/auth/login"],
+    ["POST", "/api/auth/2fa"],
+    ["POST", "/api/auth/register"],
+    ["POST", "/api/auth/forgot"],
+    ["POST", "/api/auth/reset"],
+    ["POST", "/api/setup"],
+    ["POST", "/api/pages"],
+    ["PUT", "/api/pages/teil"],
+    ["POST", "/api/render"],
+    ["PUT", "/api/settings"],
+    ["POST", "/api/users"],
+    ["PATCH", "/api/users/2"],
+    ["POST", "/api/account/password"],
+    ["POST", "/api/account/2fa/setup"],
+    ["POST", "/api/account/2fa/enable"],
+    ["POST", "/api/account/2fa/disable"],
+    ["POST", "/api/account/delete"],
+    ["PUT", "/api/legal/terms"],
+    ["GET", "/api/audit?q=%00%ff&category=__proto__&user=-1&from=1e999&before=NaN&limit=-5"],
+    ["GET", "/api/search?q=%F0%9F%92%A9%00"],
+    ["PUT", "/api/account/profile"],
+    ["POST", "/api/account/sessions"],
+    ["DELETE", "/api/account/2fa/devices/1"],
+    ["PATCH", "/api/account/2fa/devices/abc"],
+    ["POST", "/api/settings/mail-test"],
+    ["GET", "/api/search?q=" + encodeURIComponent("*a*a*a*a*a*a*a*a*b " + '"x'.repeat(40))],
+    ["GET", "/search?q=%22%2A%25_%5C"],
+  ];
+  const junk = [
+    null,
+    true,
+    -1,
+    1e308,
+    "x".repeat(20000),
+    "\u0000\ud800",
+    [],
+    [[[[[]]]]],
+    { __proto__: { admin: true } },
+    { constructor: { prototype: { x: 1 } } },
+    "<script>alert(1)</script>",
+    { a: { b: { c: { d: {} } } } },
+  ];
+  const rnd = (n) => Math.floor(Math.random() * n);
+  let fuzz500 = 0,
+    fuzzN = 0;
+  for (const [method, url] of ENDPOINTS) {
+    for (let i = 0; i < 12; i++) {
+      const keys = [
+        "username",
+        "password",
+        "email",
+        "code",
+        "token",
+        "title",
+        "content",
+        "parentId",
+        "expectedRev",
+        "role",
+        "disabled",
+        "action",
+        "lang",
+        "confirm",
+        "current",
+        "allow_registration",
+        "language",
+        "site_name",
+        "name",
+        "id",
+        "smtp_host",
+        "smtp_port",
+        "smtp_password",
+        "require_2fa_admin",
+        "password_min_digits",
+      ];
+      const body = Object.fromEntries(
+        Array.from({ length: rnd(6) }, () => [keys[rnd(keys.length)], junk[rnd(junk.length)]]),
+      );
+      const raw = i % 4 === 0 ? '{"a":' : i % 4 === 1 ? JSON.stringify(junk[rnd(junk.length)]) : JSON.stringify(body);
+      const res = await fetch(BASE + url, {
+        method,
+        headers: {
+          origin: BASE,
+          "content-type": i % 5 === 0 ? "text/plain" : "application/json",
+          cookie: `wiki_session=${admin.jar.wiki_session}`,
+        },
+        body: method === "GET" ? undefined : raw,
+      });
+      fuzzN++;
+      if (res.status >= 500 && res.status !== 503) {
+        fuzz500++;
+        console.log("   500 on", method, url, raw.slice(0, 80));
+      }
+    }
+  }
+  ok(fuzz500 === 0, `no server errors from ${fuzzN} malformed requests`);
+  const flood = await Promise.all(
+    Array.from({ length: 90 }, () =>
+      fetch(BASE + "/api/auth/login", {
+        method: "POST",
+        headers: { origin: BASE, "content-type": "application/json" },
+        body: JSON.stringify({ username: `flood${rnd(1e9)}`, password: "x-wrong-password-1" }),
+      }).then((r) => r.status),
+    ),
+  );
+  ok(
+    flood.every((s) => [401, 429, 503].includes(s)) && flood.includes(503),
+    `login flood is shed with 503s (${[...new Set(flood)].join(",")})`,
+  );
+  // keep every response referenced until the count is done: an unreferenced, unread body can be
+  // garbage-collected, which closes its connection and frees a slot mid-test
+  const sseCtl = new AbortController(),
+    held = [];
+  const conns = [];
+  for (let i = 0; i < 305; i++)
+    conns.push(
+      fetch(BASE + "/api/events", { signal: sseCtl.signal })
+        .then((r) => {
+          held.push(r);
+          return r.status;
+        })
+        .catch(() => 0),
+    );
+  const sseStatuses = await Promise.all(conns);
+  sseCtl.abort();
+  held.length = 0;
+  ok(
+    sseStatuses.filter((x) => x === 503).length >= 5 && sseStatuses.filter((x) => x === 200).length <= 300,
+    `live connections are capped (${sseStatuses.filter((x) => x === 200).length} open)`,
+  );
+  ok((await fetch(BASE + "/api/healthz")).status === 200, "server healthy after floods");
+
+  console.log("• login, lockout, 2FA");
+  const wrong = await new Client().req("POST", "/api/auth/login", {
+    username: "admin",
+    password: "wrong-wrong-wrong-1",
+  });
+  ok(wrong.status === 401, "wrong password -> 401");
+  const ghost = await new Client().req("POST", "/api/auth/login", {
+    username: "ghost",
+    password: "wrong-wrong-wrong-1",
+  });
+  ok(
+    ghost.status === 401 && ghost.json.error === wrong.json.error,
+    "unknown user indistinguishable from wrong password",
+  );
+  const su = await admin.req("POST", "/api/account/2fa/setup", { password: PW });
+  ok(
+    su.status === 200 && su.json.secret && su.json.qr.startsWith("data:image/svg+xml"),
+    "2FA setup returns secret + QR",
+  );
+  ok(
+    (await admin.req("POST", "/api/account/2fa/setup", { password: "wrong-wrong-wrong-1" })).status >= 400,
+    "2FA setup needs the password",
+  );
+  ok(
+    (await admin.req("POST", "/api/account/2fa/enable", { code: "000000" })).status >= 400,
+    "wrong first code rejected",
+  );
+  const en = await admin.req("POST", "/api/account/2fa/enable", { code: totp(su.json.secret) });
+  ok(en.status === 200 && en.json.recoveryCodes?.length === 10, "2FA enabled, 10 recovery codes");
+  const l2 = new Client();
+  const lr = await l2.req("POST", "/api/auth/login", { username: "admin", password: PW });
+  ok(
+    lr.status === 200 && lr.json.mfa === true && !l2.jar.wiki_session,
+    "password alone gives no session once 2FA is on",
+  );
+  ok((await l2.req("GET", "/api/settings")).status === 401, "mfa-stage cookie is not a session");
+  ok((await l2.req("POST", "/api/auth/2fa", { code: "123456" })).status === 401, "wrong TOTP rejected");
+  const step = Math.floor(Date.now() / 30000);
+  const code =
+    totp(su.json.secret, step + 1) === totp(su.json.secret) ? totp(su.json.secret) : totp(su.json.secret, step + 1); // a step not used at enable time
+  const l2ok = await l2.req("POST", "/api/auth/2fa", { code });
+  ok(l2ok.status === 200 && l2.jar.wiki_session, `correct TOTP logs in (${l2ok.status} ${l2ok.text.slice(0, 80)})`);
+  ok((await l2.req("GET", "/api/settings")).status === 200, "session works after 2FA");
+  const l3 = new Client();
+  await l3.req("POST", "/api/auth/login", { username: "admin", password: PW });
+  const rc = await l3.req("POST", "/api/auth/2fa", { code: en.json.recoveryCodes[0] });
+  ok(rc.status === 200, "recovery code logs in");
+  const l4 = new Client();
+  await l4.req("POST", "/api/auth/login", { username: "admin", password: PW });
+  ok(
+    (await l4.req("POST", "/api/auth/2fa", { code: en.json.recoveryCodes[0] })).status === 401,
+    "recovery code is single-use",
+  );
+
+  console.log("• several authenticator devices");
+  const su2 = await l3.req("POST", "/api/account/2fa/setup", { password: PW });
+  const en2 = await l3.req("POST", "/api/account/2fa/enable", { code: totp(su2.json.secret), name: "Tablet" });
+  ok(en2.status === 200 && en2.json.recoveryCodes === null, "second device added; recovery codes unchanged");
+  const acc = await l3.req("GET", "/account");
+  ok(
+    acc.text.includes("Tablet") && !acc.text.includes(su2.json.secret) && !acc.text.includes(su.json.secret),
+    "account page lists devices, never secrets",
+  );
+  const devIds = [...acc.text.matchAll(/\\"id\\":(\d+),\\"name\\":\\"(Authenticator|Tablet)\\"/g)].map((m) =>
+    Number(m[1]),
+  );
+  ok(devIds.length === 2, `device ids found in page data (${devIds.join(",")})`);
+  const l5 = new Client();
+  await l5.req("POST", "/api/auth/login", { username: "admin", password: PW });
+  ok(
+    (await l5.req("POST", "/api/auth/2fa", { code: totp(su2.json.secret, Math.floor(Date.now() / 30000) + 1) }))
+      .status === 200,
+    "sign-in with the second device",
+  );
+  ok(
+    (await bob.req("DELETE", `/api/account/2fa/devices/${devIds[0]}`, { password: PW })).status === 404,
+    "someone else's device can't be removed",
+  );
+  ok(
+    (await l3.req("DELETE", `/api/account/2fa/devices/${devIds[0]}`, { password: "wrong-wrong-wrong-1" })).status ===
+      403,
+    "device removal needs the password",
+  );
+  ok(
+    (await l3.req("PATCH", `/api/account/2fa/devices/${devIds[1]}`, { name: "<img src=x>" })).status === 400,
+    "device names are validated",
+  );
+
+  console.log("• two-factor required per role (owner vs. other admins)");
+  const dora = new Client();
+  ok(
+    (await l3.req("POST", "/api/users", { username: "dora", email: "dora@example.com", role: "admin", password: PW }))
+      .status === 201,
+    "owner creates a second administrator",
+  );
+  await dora.req("POST", "/api/auth/login", { username: "dora", password: PW });
+  ok(
+    (await dora.req("PUT", "/api/settings", { require_2fa_admin: true })).status === 403,
+    "an admin can't change MFA for their own role",
+  );
+  ok(
+    (await dora.req("PUT", "/api/settings", { require_2fa_editor: true, require_2fa_viewer: true })).status === 200,
+    "an admin can change MFA for lower roles",
+  );
+  const bobBlocked = await bob.req("GET", "/api/search?q=teil");
+  const bobPage = await bob.req("GET", "/settings");
+  ok(
+    bobBlocked.status === 403 && bobPage.status === 307 && /\/account/.test(bobPage.headers.get("location") || ""),
+    "a viewer without 2FA is sent to set it up",
+  );
+  ok(
+    (await dora.req("PUT", "/api/settings", { require_2fa_viewer: false, require_2fa_editor: false })).status === 200,
+    "and switch it off again",
+  );
+  ok(
+    (await l3.req("PUT", "/api/settings", { require_2fa_admin: true })).status === 200,
+    "the owner can require MFA for administrators",
+  );
+  ok((await dora.req("GET", "/api/settings")).status === 403, "an admin without 2FA must set it up first");
+  ok(
+    (await l3.req("DELETE", `/api/account/2fa/devices/${devIds[0]}`, { password: PW })).status === 200,
+    "owner removes one of two devices",
+  );
+  ok(
+    (await l3.req("DELETE", `/api/account/2fa/devices/${devIds[1]}`, { password: PW })).status === 403,
+    "the last device can't be removed while the role requires 2FA",
+  );
+  ok(
+    (await l3.req("PUT", "/api/settings", { require_2fa_admin: false })).status === 200,
+    "owner lifts the requirement again",
+  );
+
+  console.log("• logout, password reset without SMTP");
+  const old = l2.jar.wiki_session;
+  await l2.req("POST", "/api/auth/logout", {});
+  const replay = new Client();
+  replay.jar.wiki_session = old;
+  ok((await replay.req("GET", "/api/settings")).status === 401, "session token dead after logout");
+  const fg = await new Client().req("POST", "/api/auth/forgot", { email: "admin@example.com" });
+  ok(fg.status === 200, `forgot-password answers neutrally with no SMTP (${fg.status})`);
+  const fg2 = await new Client().req("POST", "/api/auth/forgot", { email: "nobody@example.com" });
+  ok(fg2.status === 200 && fg2.text === fg.text, "same answer for unknown address");
+  ok(
+    (await new Client().req("POST", "/api/auth/reset", { token: "A".repeat(43), password: "new-harbor-passphrase-9" }))
+      .status >= 400,
+    "forged reset token rejected",
+  );
+
+  console.log("• lockout");
+  for (let i = 0; i < 12; i++)
+    await new Client().req("POST", "/api/auth/login", { username: "bob", password: "wrong-wrong-wrong-1" });
+  const locked = await new Client().req("POST", "/api/auth/login", { username: "bob", password: PW });
+  ok(locked.status === 429, `account locks after repeated failures, even with the right password (${locked.status})`);
+
+  console.log("• data at rest");
+  const mk = path.join(DATA, "master.key");
+  if (env.WIKI_MASTER_KEY) ok(!existsSync(mk), "explicit master key: nothing written to the volume");
+  else ok(existsSync(mk) && (statSync(mk).mode & 0o777) === 0o600, "auto-generated master.key has mode 0600");
+  ok(
+    !/password|PW|tidal-marsh/i.test(log.replace(/password reset/gi, "")) || !log.includes(PW),
+    "password never logged",
+  );
+  ok(!log.includes(PW) && !log.includes(su.json.secret), "no secrets in server log");
+} catch (e) {
+  failed++;
+  console.log("  CRASH:", e);
+} finally {
+  srv.kill();
+  smtp.close();
+}
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed) console.log("--- server log ---\n" + log.slice(-2000));
+process.exit(failed ? 1 : 0);

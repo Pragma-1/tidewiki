@@ -1,0 +1,13 @@
+# Tidewiki — put this file and your .env (copy of .env.example) in the same folder, then:
+#   docker compose -f docker.yaml up -d
+# Image: astaldoo/tidewiki:latest on Docker Hub. Everything configurable lives in .env.
+services:
+  wiki:
+    image: astaldoo/tidewiki:latest
+    container_name: tidewiki
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${WIKI_PORT:-3000}:3000"
+    volumes:
+      - ${WIKI_DATA:-./data}:/data
