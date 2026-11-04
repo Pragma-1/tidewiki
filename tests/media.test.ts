@@ -6,7 +6,8 @@ import { sniff, stripImage, stripJpeg, storeUpload, listMedia, deleteMedia } fro
 import { renderMarkdown } from "@/lib/markdown";
 import { classify } from "@/lib/embed-url";
 import * as auth from "@/lib/auth";
-import { db, now } from "@/lib/db";
+import { db } from "./pg";
+import { now } from "@/lib/db";
 import { updateSettings } from "@/lib/settings";
 import { generateLegal, getLegal, resetLegal, setLegal } from "@/lib/legal";
 import { purgeExpired } from "@/lib/retention";
@@ -31,7 +32,7 @@ const stream = (b: Buffer) =>
   });
 
 describe("file type detection", () => {
-  it("accepts only real images/videos by their bytes", () => {
+  it("accepts only real images/videos by their bytes", async () => {
     expect(sniff(fx("exif.jpg"))?.mime).toBe("image/jpeg");
     expect(sniff(fx("meta.png"))?.mime).toBe("image/png");
     expect(sniff(fx("exif.webp"))?.mime).toBe("image/webp");
@@ -45,7 +46,7 @@ describe("file type detection", () => {
 });
 
 describe("metadata stripping", () => {
-  it("JPEG: removes EXIF/GPS, comments and appended trailers but keeps the orientation", () => {
+  it("JPEG: removes EXIF/GPS, comments and appended trailers but keeps the orientation", async () => {
     const src = fx("exif.jpg");
     expect(has(src, "SECRET-CAMERA-MAKE") && has(src, "SECRET-COMMENT") && has(src, "TRAILER-SECRET")).toBe(true);
     const out = stripJpeg(src);
@@ -59,7 +60,7 @@ describe("metadata stripping", () => {
     expect(out[i + 6 + 8 + 2 + 8]).toBe(6);
     expect(stripJpeg(out).equals(out)).toBe(true); // idempotent
   });
-  it("PNG, WebP and GIF: text/EXIF/comment blocks removed, image data intact", () => {
+  it("PNG, WebP and GIF: text/EXIF/comment blocks removed, image data intact", async () => {
     for (const [f, ext, secret] of [
       ["meta.png", "png", "SECRET"],
       ["exif.webp", "webp", "SECRET-CAMERA-MAKE"],
@@ -74,7 +75,7 @@ describe("metadata stripping", () => {
     const webp = stripImage(fx("exif.webp"), "webp");
     expect(webp.readUInt32LE(4)).toBe(webp.length - 8); // RIFF size fixed up
   });
-  it("rejects truncated or garbage files instead of storing them half-parsed", () => {
+  it("rejects truncated or garbage files instead of storing them half-parsed", async () => {
     const jpg = fx("exif.jpg");
     expect(() => stripJpeg(jpg.subarray(0, 40))).toThrow();
     expect(() => stripImage(Buffer.concat([fx("meta.png").subarray(0, 30)]), "png")).toThrow();
@@ -86,7 +87,13 @@ describe("metadata stripping", () => {
 describe("uploads", () => {
   let uid = 0;
   it("stores a cleaned image under a random name and refuses non-media", async () => {
-    uid = await auth.setupAdmin(auth.ensureSetupToken()!, "chef", "chef@example.com", "tidal-marsh-lantern-47", null);
+    uid = await auth.setupAdmin(
+      (await auth.ensureSetupToken())!,
+      "chef",
+      "chef@example.com",
+      "tidal-marsh-lantern-47",
+      null,
+    );
     const m = await storeUpload(stream(fx("exif.jpg")), 0, "Urlaub <script>.jpg", uid);
     expect(m.name).toMatch(/^[A-Za-z0-9_-]{22}\.jpg$/);
     expect(m.original_name).toBe("Urlaub script.jpg");
@@ -98,11 +105,11 @@ describe("uploads", () => {
     await expect(storeUpload(stream(Buffer.alloc(0)), 0, null, uid)).rejects.toThrow(/Only PNG/);
     const v = await storeUpload(stream(fx("tiny.mp4")), 0, "clip.mp4", uid);
     expect(v.kind).toBe("video");
-    expect(listMedia().length).toBe(2);
-    expect(listMedia()[0].used_in).toBe(0);
-    deleteMedia(v.id, { id: uid, role: "admin" });
-    expect(listMedia().length).toBe(1);
-    expect(() => deleteMedia(m.id, { id: 999, role: "editor" })).toThrow(/uploader/);
+    expect((await listMedia()).length).toBe(2);
+    expect((await listMedia())[0].used_in).toBe(0);
+    await deleteMedia(v.id, { id: uid, role: "admin" });
+    expect((await listMedia()).length).toBe(1);
+    await expect(deleteMedia(m.id, { id: 999, role: "editor" })).rejects.toThrow(/uploader/);
   });
   it("enforces the size limit while streaming", async () => {
     const big = Buffer.concat([fx("exif.jpg"), Buffer.alloc(16 * 1024 * 1024)]);
@@ -115,7 +122,7 @@ describe("uploads", () => {
 
 describe("embeds in Markdown", () => {
   const html = (s: string, o = {}) => renderMarkdown(s, { lang: "de", ...o }).html;
-  it("classifies video links", () => {
+  it("classifies video links", async () => {
     for (const u of [
       "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
       "https://youtu.be/dQw4w9WgXcQ?t=3",
@@ -139,7 +146,7 @@ describe("embeds in Markdown", () => {
     expect(classify("/etc/passwd")).toBeNull();
     expect(classify("https://www.youtube.com/watch?v=<script>")?.kind).toBe("link");
   });
-  it("YouTube/Vimeo render a click-to-load placeholder: no iframe, nothing loaded from the provider", () => {
+  it("YouTube/Vimeo render a click-to-load placeholder: no iframe, nothing loaded from the provider", async () => {
     const out = html("@[Einführung](https://www.youtube.com/watch?v=dQw4w9WgXcQ)");
     expect(out).toContain('data-embed="youtube"');
     expect(out).toContain('data-id="dQw4w9WgXcQ"');
@@ -147,7 +154,7 @@ describe("embeds in Markdown", () => {
     expect(out).not.toMatch(/<iframe|<script|ytimg|youtube-nocookie/);
     expect(html("![](https://vimeo.com/76979871)")).toContain('data-embed="vimeo"');
   });
-  it("direct video files get a player that never autoplays or preloads", () => {
+  it("direct video files get a player that never autoplays or preloads", async () => {
     const out = html("@[Clip](/media/AAAAAAAAAAAAAAAAAAAAAA.mp4)");
     expect(out).toMatch(/<video src="\/media\/AAAAAAAAAAAAAAAAAAAAAA\.mp4" controls preload="none" playsinline>/);
     expect(out.startsWith("<figure")).toBe(true); // a block embed isn't wrapped in an empty paragraph
@@ -155,7 +162,7 @@ describe("embeds in Markdown", () => {
     expect(html("![x](https://cdn.example.org/v.webm)")).toContain("<video");
     expect(html("@[x](http://cdn.example.org/v.mp4)")).not.toContain("<video"); // plain http video is not played
   });
-  it("other links become a link card; external images wait for a click unless autoload is on", () => {
+  it("other links become a link card; external images wait for a click unless autoload is on", async () => {
     expect(html("@[Mitschnitt](https://example.org/watch/1)")).toMatch(
       /class="video-link ext" href="https:\/\/example\.org\/watch\/1" rel="noopener noreferrer nofollow ugc" target="_blank"/,
     );
@@ -169,7 +176,7 @@ describe("embeds in Markdown", () => {
       /<img src="\/media\/AAAAAAAAAAAAAAAAAAAAAA\.jpg"/,
     );
   });
-  it("embed syntax can't be used for injection", () => {
+  it("embed syntax can't be used for injection", async () => {
     const evil = [
       '@["><img src=x onerror=alert(1)>](https://youtu.be/dQw4w9WgXcQ)',
       "@[x](javascript:alert(1))",
@@ -192,55 +199,55 @@ describe("embeds in Markdown", () => {
 });
 
 describe("legal pages", () => {
-  it("templates reflect the operator details and real settings", () => {
-    updateSettings({
+  it("templates reflect the operator details and real settings", async () => {
+    await updateSettings({
       operator_name: "DRK Muster e. V.",
       operator_address: "Musterstraße 1\n10115 Berlin",
       operator_email: "datenschutz@example.org",
       log_retention_days: 90,
     });
-    const de = generateLegal("privacy", "de");
+    const de = await generateLegal("privacy", "de");
     expect(de).toContain("DRK Muster e. V.");
     expect(de).toContain("Musterstraße 1  \n10115 Berlin");
     expect(de).toContain("nach 90 Tagen");
     expect(de).toMatch(/Art\. 77 DSGVO/);
     expect(de).toMatch(/§ 25 Abs\. 2 Nr\. 2 TDDDG/);
     expect(de).not.toMatch(/IP-Adressen werden nach/); // no proxy configured -> no IPs logged, and the text says so
-    expect(generateLegal("imprint", "de")).toMatch(/§ 5 DDG/);
-    expect(generateLegal("terms", "en")).toMatch(/Terms of use/);
+    expect(await generateLegal("imprint", "de")).toMatch(/§ 5 DDG/);
+    expect(await generateLegal("terms", "en")).toMatch(/Terms of use/);
   });
-  it("operator text can't inject links or HTML", () => {
-    updateSettings({ operator_name: "[Klick](javascript:alert(1)) <b>x</b>" });
-    const out = renderMarkdown(generateLegal("imprint", "de")).html;
+  it("operator text can't inject links or HTML", async () => {
+    await updateSettings({ operator_name: "[Klick](javascript:alert(1)) <b>x</b>" });
+    const out = renderMarkdown(await generateLegal("imprint", "de")).html;
     expect(out).not.toMatch(/href="javascript|<b>/);
-    updateSettings({ operator_name: "DRK Muster e. V." });
-    expect(updateSettings({ operator_email: "not an email" })).toMatchObject({ ok: false });
-    expect(updateSettings({ operator_name: "a\u0000b" })).toMatchObject({ ok: false });
-    expect(updateSettings({ operator_address: "x".repeat(301) })).toMatchObject({ ok: false });
+    await updateSettings({ operator_name: "DRK Muster e. V." });
+    expect(await updateSettings({ operator_email: "not an email" })).toMatchObject({ ok: false });
+    expect(await updateSettings({ operator_name: "a\u0000b" })).toMatchObject({ ok: false });
+    expect(await updateSettings({ operator_address: "x".repeat(301) })).toMatchObject({ ok: false });
   });
-  it("custom text per language overrides the template until reset", () => {
-    setLegal("terms", "de", "# Eigene Bedingungen", 1);
-    expect(getLegal("terms", "de")).toMatchObject({ custom: true, content: "# Eigene Bedingungen" });
-    expect(getLegal("terms", "en").custom).toBe(false);
-    expect(() => setLegal("terms", "de", "   ", 1)).toThrow(/empty/);
-    expect(resetLegal("terms", "de")).toBe(true);
-    expect(getLegal("terms", "de").custom).toBe(false);
+  it("custom text per language overrides the template until reset", async () => {
+    await setLegal("terms", "de", "# Eigene Bedingungen", 1);
+    expect(await getLegal("terms", "de")).toMatchObject({ custom: true, content: "# Eigene Bedingungen" });
+    expect((await getLegal("terms", "en")).custom).toBe(false);
+    await expect(setLegal("terms", "de", "   ", 1)).rejects.toThrow(/empty/);
+    expect(await resetLegal("terms", "de")).toBe(true);
+    expect((await getLegal("terms", "de")).custom).toBe(false);
   });
 });
 
 describe("retention", () => {
-  it("removes old IPs and old log entries", () => {
-    updateSettings({ ip_retention_days: 7, log_retention_days: 30 });
+  it("removes old IPs and old log entries", async () => {
+    await updateSettings({ ip_retention_days: 7, log_retention_days: 30 });
     const t = now();
-    db()
+    await db()
       .prepare("INSERT INTO audit_log(ts,user_id,event,ip) VALUES(?,?,?,?)")
       .run(t - 8 * 86400, null, "login.failed", "203.0.113.1");
-    db()
+    await db()
       .prepare("INSERT INTO audit_log(ts,user_id,event,ip) VALUES(?,?,?,?)")
       .run(t - 31 * 86400, null, "login.failed", "203.0.113.2");
-    audit("login.failed", null, "203.0.113.3");
-    purgeExpired();
-    const rows = db().prepare("SELECT ip FROM audit_log WHERE event='login.failed' ORDER BY ts").all() as {
+    await audit("login.failed", null, "203.0.113.3");
+    await purgeExpired();
+    const rows = (await db().prepare("SELECT ip FROM audit_log WHERE event='login.failed' ORDER BY ts").all()) as {
       ip: string | null;
     }[];
     expect(rows).toEqual([{ ip: null }, { ip: "203.0.113.3" }]);

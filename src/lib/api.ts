@@ -7,6 +7,7 @@ import { HttpError, isRecord } from "./validate";
 import { SESSION_COOKIE } from "./session-cookie";
 import { langFromRequest } from "./i18n-server";
 import { makeT, type Lang, type T } from "./i18n";
+import { pgCode } from "./db";
 
 export const json = (data: unknown, status = 200, headers?: HeadersInit) =>
   NextResponse.json(data, { status, headers: { "Cache-Control": "no-store", ...headers } });
@@ -84,7 +85,7 @@ export function api<P = Record<string, never>>(
             "Cross-site request blocked. If you opened the wiki under a different address, set WIKI_BASE_URL to it.",
           );
       }
-      const user = resolveSession(req.cookies.get(SESSION_COOKIE)?.value);
+      const user = await resolveSession(req.cookies.get(SESSION_COOKIE)?.value);
       if (level !== "public" && !user) throw new HttpError(401, "Please sign in.");
       if (user) {
         if (user.needs2faSetup && !opts.allowPending2fa)
@@ -92,7 +93,7 @@ export function api<P = Record<string, never>>(
         if (level === "editor" && user.role === "viewer") throw new HttpError(403, "Your account is read-only.");
         if (level === "admin" && user.role !== "admin") throw new HttpError(403, "Administrators only.");
       }
-      if (opts.readGate && !user && !getSettings().public_read) throw new HttpError(401, "Please sign in.");
+      if (opts.readGate && !user && !(await getSettings()).public_read) throw new HttpError(401, "Please sign in.");
       return await handler({
         req,
         user,
@@ -104,7 +105,16 @@ export function api<P = Record<string, never>>(
       });
     } catch (e) {
       if (e instanceof HttpError) return json({ error: t(e.message), field: e.field }, e.status);
-      console.error("[api] unexpected error:", e instanceof Error ? e.message : "unknown");
+      // Database errors are mapped to safe, generic answers — their text (SQL, values) never reaches the client.
+      const code = pgCode(e);
+      if (code === "23505") return json({ error: t("This already exists.") }, 409);
+      if (code === "23503" || code === "23514" || code.startsWith("22"))
+        return json({ error: t("The request contains invalid values.") }, 400);
+      if (code === "40001" || code === "40P01" || code === "57014" || code === "53300")
+        return json({ error: t("The server is busy. Try again in a moment.") }, 503);
+      if (["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "57P01", "57P03"].includes(code))
+        return json({ error: t("The database is not reachable right now.") }, 503);
+      console.error("[api] unexpected failure:", e instanceof Error ? `${code} ${e.message}`.trim() : "unknown");
       return json({ error: t("Something went wrong on the server.") }, 500);
     }
   };

@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 
 export const GET = api<{ id: string }>("admin", async ({ user, ip, params }) => {
   if (!/^\d{1,9}$/.test(params.id)) throw new HttpError(404, "User not found.");
-  const data = exportUserData(Number(params.id));
-  audit("admin.export", user!.id, ip, `personal data of ${data.account.username}`, data.account.id);
+  const data = await exportUserData(Number(params.id));
+  await audit("admin.export", user!.id, ip, `personal data of ${data.account.username}`, data.account.id);
   return download(
     JSON.stringify(data, null, 2),
     `personal-data-${data.account.username}-${stamp()}.json`,

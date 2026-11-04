@@ -1,5 +1,5 @@
 import MarkdownIt, { type Token } from "markdown-it";
-import { db } from "./db";
+import { all, one, run, sql, tx, type Sql } from "./db";
 import { HttpError } from "./validate";
 
 /*
@@ -7,7 +7,7 @@ import { HttpError } from "./validate";
  *
  *  - Text is folded (lower case, accents removed, ß → ss) both when indexing and when querying,
  *    so "fur" finds "für" and "STRASSE" finds "Straße".
- *  - A trigram FTS5 index narrows the candidates; the exact check runs in JavaScript.
+ *  - PostgreSQL trigram (pg_trgm) indexes narrow the candidates; the exact check runs in JavaScript.
  *  - Wildcards are matched with a plain left-to-right scan (no regular expressions built from
  *    user input), so no query can trigger catastrophic backtracking.
  *  - Every search runs against a time budget, and a global CPU budget caps what a flood of
@@ -84,30 +84,35 @@ export function markdownToPlain(src: string): string {
 
 const MAX_PLAIN = 600_000;
 
-/** Brings the index up to date for every page written since the last search (marked by triggers). */
-export function flushIndex() {
-  const dirty = db().prepare("SELECT page_id FROM search_dirty LIMIT 1").get();
-  if (!dirty) return;
-  const pick = db().prepare("SELECT page_id FROM search_dirty LIMIT 200");
-  const get = db().prepare("SELECT id, title, content FROM pages WHERE id=?");
-  const del = db().prepare("DELETE FROM search_idx WHERE rowid=?");
-  const ins = db().prepare("INSERT INTO search_idx(rowid, title, body, plain) VALUES(?,?,?,?)");
-  const done = db().prepare("DELETE FROM search_dirty WHERE page_id=?");
-  for (;;) {
-    const batch = pick.all() as { page_id: number }[];
-    if (!batch.length) break;
-    db().transaction(() => {
-      for (const { page_id } of batch) {
-        const p = get.get(page_id) as { id: number; title: string; content: string } | undefined;
-        del.run(page_id);
-        if (p) {
-          const plain = markdownToPlain(p.content).slice(0, MAX_PLAIN);
-          ins.run(p.id, fold(p.title), fold(plain), plain);
-        }
-        done.run(page_id);
+/**
+ * Brings the index up to date for every page written since the last search (marked by triggers).
+ * Batches are claimed with SKIP LOCKED, so two searches running at once never index a page twice.
+ */
+export async function flushIndex() {
+  if (!(await one(sql`SELECT 1 FROM search_dirty LIMIT 1`))) return;
+  for (let guard = 0; guard < 10_000; guard++) {
+    const n = await tx(async () => {
+      const batch = await all<{ id: number; title: string; content: string }>(
+        sql`SELECT p.id, p.title, p.content FROM search_dirty d JOIN pages p ON p.id = d.page_id
+            ORDER BY d.page_id LIMIT 50 FOR UPDATE OF d SKIP LOCKED`,
+      );
+      for (const p of batch) {
+        const plain = markdownToPlain(p.content).slice(0, MAX_PLAIN);
+        await run(
+          sql`INSERT INTO search_idx(page_id, title, body, plain) VALUES (${p.id}, ${fold(p.title)}, ${fold(plain)}, ${plain})
+              ON CONFLICT (page_id) DO UPDATE SET title = excluded.title, body = excluded.body, plain = excluded.plain`,
+        );
+        await run(sql`DELETE FROM search_dirty WHERE page_id = ${p.id}`);
       }
-    })();
+      return batch.length;
+    });
+    if (!n) break;
   }
+}
+
+/** Marks every page for re-indexing (after a restore or import). */
+export async function reindexAll() {
+  await run(sql`INSERT INTO search_dirty(page_id) SELECT id FROM pages ON CONFLICT DO NOTHING`);
 }
 
 /* ------------------------------------------------------------------- query */
@@ -295,73 +300,79 @@ const cpuExhausted = () => Date.now() - cpuStart <= CPU_WINDOW_MS && cpuUsed >= 
 export type SearchHit = { slug: string; title: Segment[]; snippet: Segment[]; score: number };
 export type SearchResult = { hits: SearchHit[]; total: number; partial: boolean };
 
-const ftsPhrase = (s: string) => `"${s.replace(/"/g, '""')}"`;
 const likeArg = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const MAX_CANDIDATES = 3000;
 
-export function search(q: string, opts: { limit?: number; budgetMs?: number } = {}): SearchResult {
+export async function search(q: string, opts: { limit?: number; budgetMs?: number } = {}): Promise<SearchResult> {
   const terms = parseQuery(q);
   if (!terms.length) return { hits: [], total: 0, partial: false };
   if (cpuExhausted()) throw new HttpError(503, "Search is busy right now. Try again in a moment.");
   const started = performance.now();
   const deadline = started + (opts.budgetMs ?? 350);
   try {
-    flushIndex();
-    // SQL prefilter: the longest literal part of each term must occur (trigram index when ≥ 3 characters).
-    const match: string[] = [];
-    const where: string[] = [];
-    const args: string[] = [];
-    for (const t of terms) {
+    await flushIndex();
+    // Every term must appear in title or text; the longest literal part of each term goes to the
+    // trigram index (LIKE '%…%' is answered from it). Wildcards are checked exactly afterwards.
+    const where: Sql[] = terms.map((t) => {
       const longest = t.parts.reduce((a, b) => ([...b].length > [...a].length ? b : a), "");
-      if ([...longest].length >= 3) match.push(ftsPhrase(longest));
-      else {
-        where.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')");
-        args.push(likeArg(longest), likeArg(longest));
-      }
-    }
-    if (match.length) {
-      where.unshift("search_idx MATCH ?");
-      args.unshift(match.join(" AND "));
-    }
-    const ids = db()
-      .prepare(`SELECT rowid AS id FROM search_idx WHERE ${where.join(" AND ")} LIMIT ${MAX_CANDIDATES}`)
-      .all(...args) as { id: number }[];
+      const l = likeArg(longest);
+      return sql`(title LIKE ${l} OR body LIKE ${l})`;
+    });
+    const ids = (
+      await all<{ id: number }>(
+        sql`SELECT page_id AS id FROM search_idx WHERE ${sql.join(where, sql` AND `)} LIMIT ${MAX_CANDIDATES}`,
+      )
+    ).map((r) => r.id);
 
-    const row = db().prepare("SELECT title, body FROM search_idx WHERE rowid=?");
     const scored: { id: number; score: number }[] = [];
     let partial = ids.length >= MAX_CANDIDATES;
-    for (const { id } of ids) {
+    // fetched in small batches: 3000 candidates × large pages must never be in memory at once
+    outer: for (let i = 0; i < ids.length; i += 25) {
       if (performance.now() > deadline) {
         partial = true;
         break;
       }
-      const r = row.get(id) as { title: string; body: string };
-      let score = 0;
-      let all = true;
-      for (const t of terms) {
-        const inTitle = countHits(r.title, t, 5, deadline);
-        const inBody = countHits(r.body, t, 50, deadline);
-        if (inTitle + inBody === 0) {
-          all = false;
-          break;
+      const rows = await all<{ id: number; title: string; body: string }>(
+        sql`SELECT page_id AS id, title, body FROM search_idx WHERE page_id = ANY(${ids.slice(i, i + 25)}::bigint[])`,
+      );
+      for (const r of rows) {
+        if (performance.now() > deadline) {
+          partial = true;
+          break outer;
         }
-        score +=
-          inTitle * 20 +
-          Math.min(inBody, 50) +
-          (r.title === t.text ? 50 : 0) +
-          (!t.glob && r.title.startsWith(t.parts[0]) ? 10 : 0);
+        let score = 0;
+        let ok = true;
+        for (const t of terms) {
+          const inTitle = countHits(r.title, t, 5, deadline);
+          const inBody = countHits(r.body, t, 50, deadline);
+          if (inTitle + inBody === 0) {
+            ok = false;
+            break;
+          }
+          score +=
+            inTitle * 20 +
+            Math.min(inBody, 50) +
+            (r.title === t.text ? 50 : 0) +
+            (!t.glob && r.title.startsWith(t.parts[0]) ? 10 : 0);
+        }
+        if (ok) scored.push({ id: r.id, score });
       }
-      if (all) scored.push({ id, score });
     }
     scored.sort((a, b) => b.score - a.score || a.id - b.id);
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 500);
-    const page = db().prepare(
-      "SELECT p.slug, p.title, s.plain FROM pages p JOIN search_idx s ON s.rowid=p.id WHERE p.id=?",
+    const top = scored.slice(0, limit);
+    const pages = new Map(
+      (
+        await all<{ id: number; slug: string; title: string; plain: string }>(
+          sql`SELECT p.id, p.slug, p.title, left(s.plain, 120000) AS plain FROM pages p JOIN search_idx s ON s.page_id = p.id
+              WHERE p.id = ANY(${top.map((x) => x.id)}::bigint[])`,
+        )
+      ).map((p) => [p.id, p]),
     );
     const hits: SearchHit[] = [];
-    for (const { id, score } of scored.slice(0, limit)) {
-      const p = page.get(id) as { slug: string; title: string; plain: string } | undefined;
+    for (const { id, score } of top) {
+      const p = pages.get(id);
       if (!p) continue;
       const late = performance.now() > deadline + 150;
       hits.push({

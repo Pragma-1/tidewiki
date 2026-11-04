@@ -3,7 +3,7 @@ import { createUser, isRole, listUsers } from "@/lib/admin";
 import { HttpError, str } from "@/lib/validate";
 export const dynamic = "force-dynamic";
 
-export const GET = api("admin", async () => json(listUsers()));
+export const GET = api("admin", async () => json(await listUsers()));
 
 export const POST = api("admin", async ({ body, user, ip }) => {
   const b = await body();

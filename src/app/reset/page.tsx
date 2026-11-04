@@ -13,7 +13,7 @@ export default async function Reset() {
   await gate("none");
   return (
     <Shell live={false}>
-      <ResetForm policy={policyFromSettings(getSettings())} />
+      <ResetForm policy={policyFromSettings(await getSettings())} />
     </Shell>
   );
 }

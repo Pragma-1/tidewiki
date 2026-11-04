@@ -14,7 +14,7 @@ export const GET = api<{ name: string }>(
   "public",
   async ({ params, req }) => {
     if (!NAME.test(params.name)) throw new HttpError(404, "File not found.");
-    const m = getMediaByName(params.name);
+    const m = await getMediaByName(params.name);
     if (!m) throw new HttpError(404, "File not found.");
     const file = path.join(/* turbopackIgnore: true */ MEDIA_DIR(), m.name);
     let size: number;

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BASE_URL, DATA_DIR, ISSUER } from "./config";
-import { db, now } from "./db";
+import { all, one, run, sql, tx, now, pgCode } from "./db";
 import { decrypt, encrypt, hmac, randomToken, safeEqual, sha256 } from "./crypto";
 import { checkPasswordStrength, hashPassword, needsRehash, verifyDummy, verifyPassword } from "./password";
 import { consume, isBlocked, purgeRateLimits, recordFailure } from "./rate-limit";
@@ -52,20 +52,26 @@ export type SessionUser = {
  * Without it, a shared "unknown" bucket would let one attacker lock every visitor out, so we skip it
  * and rely on per-account lock-out plus the capped Argon2 concurrency instead.
  */
-const ipAllowed = (key: string, ip: string | null, limit: number, windowSec: number) =>
-  ip === null || consume(`${key}:${ip}`, limit, windowSec);
+const ipAllowed = async (key: string, ip: string | null, limit: number, windowSec: number) =>
+  ip === null || (await consume(`${key}:${ip}`, limit, windowSec));
 
 const MFA_TTL = 5 * 60;
 const MFA_MAX_ATTEMPTS = 5;
 
-export const userById = (id: number) => db().prepare("SELECT * FROM users WHERE id=?").get(id) as UserRow | undefined;
+export const userById = (id: number) => one<UserRow>(sql`SELECT * FROM users WHERE id = ${id}`);
+// usernames can't contain "@", so a sign-in name matches at most one account
 const userByLogin = (login: string) =>
-  db().prepare("SELECT * FROM users WHERE username=? OR email=?").get(login, login) as UserRow | undefined;
-export const userCount = () => (db().prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+  one<UserRow>(
+    sql`SELECT * FROM users WHERE lower(username) = lower(${login}) OR lower(email) = lower(${login}) LIMIT 1`,
+  );
+export const userCount = async () => (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM users`))?.n ?? 0;
 
 /* ---------------------------------------------------------------- sessions */
 
-export function createSession(
+/** Browser identification as stored: printable characters only, short. */
+const cleanUa = (ua: string | null) => (ua ? ua.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : null);
+
+export async function createSession(
   userId: number,
   kind: "full" | "mfa",
   ttlSec: number,
@@ -74,35 +80,36 @@ export function createSession(
 ) {
   const token = randomToken(32);
   const t = now();
-  db()
-    .prepare(
-      "INSERT INTO sessions(id_hash,user_id,kind,created_at,last_seen,expires_at,ip,user_agent) VALUES(?,?,?,?,?,?,?,?)",
-    )
-    .run(sha256(token), userId, kind, t, t, t + ttlSec, ip, ua ? ua.slice(0, 200) : null);
-  // At most 30 sessions per person: the oldest ones are dropped.
-  db()
-    .prepare(
-      `DELETE FROM sessions WHERE user_id=? AND id_hash IN (SELECT id_hash FROM sessions WHERE user_id=? ORDER BY last_seen DESC LIMIT -1 OFFSET 30)`,
-    )
-    .run(userId, userId);
+  await tx(async () => {
+    await run(
+      sql`INSERT INTO sessions(id_hash, user_id, kind, created_at, last_seen, expires_at, ip, user_agent)
+          VALUES (${sha256(token)}, ${userId}, ${kind}, ${t}, ${t}, ${t + ttlSec}, ${ip}, ${cleanUa(ua)})`,
+    );
+    // At most 30 sessions per person: the oldest ones are dropped.
+    await run(
+      sql`DELETE FROM sessions WHERE user_id = ${userId} AND id_hash IN
+          (SELECT id_hash FROM sessions WHERE user_id = ${userId} ORDER BY last_seen DESC OFFSET 30)`,
+    );
+  });
   return token; // only the hash is stored: a leaked DB can't be replayed as cookies
 }
 
-export function resolveSession(token: string | undefined | null): SessionUser | null {
-  if (!token || token.length < 40 || token.length > 100) return null;
+export async function resolveSession(token: string | undefined | null): Promise<SessionUser | null> {
+  if (!token || token.length < 40 || token.length > 100 || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
   const hash = sha256(token);
-  const s = db().prepare("SELECT * FROM sessions WHERE id_hash=? AND kind='full'").get(hash) as
-    { user_id: number; expires_at: number; last_seen: number } | undefined;
+  const s = await one<{ user_id: number; expires_at: number; last_seen: number }>(
+    sql`SELECT user_id, expires_at, last_seen FROM sessions WHERE id_hash = ${hash} AND kind = 'full'`,
+  );
   if (!s) return null;
   const t = now();
   if (s.expires_at <= t) {
-    db().prepare("DELETE FROM sessions WHERE id_hash=?").run(hash);
+    await run(sql`DELETE FROM sessions WHERE id_hash = ${hash}`);
     return null;
   }
-  const u = userById(s.user_id);
+  const u = await userById(s.user_id);
   if (!u || u.disabled) return null;
-  if (t - s.last_seen > 60) db().prepare("UPDATE sessions SET last_seen=? WHERE id_hash=?").run(t, hash);
-  const mfaRequired = mfaRequiredFor(getSettings(), u.role);
+  if (t - s.last_seen > 60) await run(sql`UPDATE sessions SET last_seen = ${t} WHERE id_hash = ${hash}`);
+  const mfaRequired = mfaRequiredFor(await getSettings(), u.role);
   return {
     id: u.id,
     username: u.username,
@@ -116,53 +123,48 @@ export function resolveSession(token: string | undefined | null): SessionUser | 
   };
 }
 
-export const destroySession = (token: string | undefined) => {
-  if (token) db().prepare("DELETE FROM sessions WHERE id_hash=?").run(sha256(token));
-};
+export async function destroySession(token: string | undefined) {
+  if (token) await run(sql`DELETE FROM sessions WHERE id_hash = ${sha256(token)}`);
+}
 export const revokeUserSessions = (userId: number, exceptHash?: string) =>
-  db()
-    .prepare("DELETE FROM sessions WHERE user_id=? AND id_hash IS NOT ?")
-    .run(userId, exceptHash ?? null);
+  run(sql`DELETE FROM sessions WHERE user_id = ${userId} AND id_hash IS DISTINCT FROM ${exceptHash ?? null}::text`);
 
 export function listSessions(userId: number) {
-  return db()
-    .prepare(
-      "SELECT id_hash, created_at, last_seen, ip, user_agent FROM sessions WHERE user_id=? AND kind='full' AND expires_at>? ORDER BY last_seen DESC",
-    )
-    .all(userId, now()) as {
-    id_hash: string;
-    created_at: number;
-    last_seen: number;
-    ip: string | null;
-    user_agent: string | null;
-  }[];
+  return all<{ id_hash: string; created_at: number; last_seen: number; ip: string | null; user_agent: string | null }>(
+    sql`SELECT id_hash, created_at, last_seen, ip, user_agent FROM sessions
+        WHERE user_id = ${userId} AND kind = 'full' AND expires_at > ${now()} ORDER BY last_seen DESC`,
+  );
 }
 
 /** Public handle for a session: derived from (never equal to) the stored hash, which is derived from the cookie. */
 export const sessionHandle = (idHash: string) => sha256(`session-handle:${idHash}`).slice(0, 24);
 
 /** Signs out one of the person's own sessions. Returns whether it was the current one. */
-export function revokeOwnSession(user: SessionUser, handle: string, ip: string | null): { current: boolean } {
+export async function revokeOwnSession(
+  user: SessionUser,
+  handle: string,
+  ip: string | null,
+): Promise<{ current: boolean }> {
   if (!/^[0-9a-f]{24}$/.test(handle)) throw new HttpError(404, "That session no longer exists.");
-  const target = listSessions(user.id).find((s) => safeEqual(sessionHandle(s.id_hash), handle));
+  const target = (await listSessions(user.id)).find((s) => safeEqual(sessionHandle(s.id_hash), handle));
   if (!target) throw new HttpError(404, "That session no longer exists.");
-  db().prepare("DELETE FROM sessions WHERE id_hash=? AND user_id=?").run(target.id_hash, user.id);
-  audit("session.revoked", user.id, ip);
+  await run(sql`DELETE FROM sessions WHERE id_hash = ${target.id_hash} AND user_id = ${user.id}`);
+  await audit("session.revoked", user.id, ip);
   return { current: target.id_hash === user.sessionHash };
 }
 
-export function revokeOtherSessions(user: SessionUser, ip: string | null): number {
-  const n = db().prepare("DELETE FROM sessions WHERE user_id=? AND id_hash<>?").run(user.id, user.sessionHash).changes;
-  audit("session.revoked_others", user.id, ip, String(n));
+export async function revokeOtherSessions(user: SessionUser, ip: string | null): Promise<number> {
+  const n = await run(sql`DELETE FROM sessions WHERE user_id = ${user.id} AND id_hash <> ${user.sessionHash}`);
+  await audit("session.revoked_others", user.id, ip, String(n));
   return n;
 }
 
-function housekeeping() {
+async function housekeeping() {
   if (Math.random() < 0.05) {
-    db().prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now());
-    db().prepare("DELETE FROM reset_tokens WHERE expires_at <= ?").run(now());
-    purgeRateLimits();
-    purgeLockouts();
+    await run(sql`DELETE FROM sessions WHERE expires_at <= ${now()}`);
+    await run(sql`DELETE FROM reset_tokens WHERE expires_at <= ${now()}`);
+    await purgeRateLimits();
+    await purgeLockouts();
   }
 }
 
@@ -174,20 +176,20 @@ export type LoginResult =
   | { status: "fail" }
   | { status: "blocked"; retryIn: number };
 
-const unknownNameRows = () =>
+const unknownNameRows = async () =>
   (
-    db().prepare("SELECT COUNT(*) n FROM (SELECT 1 FROM lockouts WHERE user_id IS NULL LIMIT 20000)").get() as {
-      n: number;
-    }
-  ).n;
+    await one<{ n: number }>(
+      sql`SELECT COUNT(*) AS n FROM (SELECT 1 FROM lockouts WHERE user_id IS NULL LIMIT 20000) x`,
+    )
+  )?.n ?? 0;
 const failKey = (u: UserRow | undefined, ident: string) => (u ? userKey(u.id) : nameKey(ident));
 
 /** Counts a failure; when it triggers a lock, records it in the security log. */
-function fail(key: string, user: UserRow | undefined, ip: string | null) {
+async function fail(key: string, user: UserRow | undefined, ip: string | null) {
   // Counters for names that don't exist are bounded, so spraying random names can't grow the table forever.
-  if (!user && unknownNameRows() >= 20_000) return;
-  const locked = registerFailure(key, getSettings().max_login_attempts, user?.id ?? null);
-  if (locked && user) audit("login.locked", user.id, ip, `${Math.round(locked / 60)} min`, user.id);
+  if (!user && (await unknownNameRows()) >= 20_000) return;
+  const locked = await registerFailure(key, (await getSettings()).max_login_attempts, user?.id ?? null);
+  if (locked && user) await audit("login.locked", user.id, ip, `${Math.round(locked / 60)} min`, user.id);
 }
 
 export async function attemptLogin(
@@ -196,43 +198,42 @@ export async function attemptLogin(
   ip: string | null,
   ua: string | null,
 ): Promise<LoginResult> {
-  housekeeping();
-  const cfg = getSettings();
+  await housekeeping();
+  const cfg = await getSettings();
   // Coarse per-IP throttle (only when a trusted proxy tells us the real client IP).
-  if (!ipAllowed("login:ip", ip, 40, 900)) return { status: "blocked", retryIn: 900 };
-  const user = userByLogin(ident);
+  if (!(await ipAllowed("login:ip", ip, 40, 900))) return { status: "blocked", retryIn: 900 };
+  const user = await userByLogin(ident);
   const key = failKey(user, ident);
-  const wait = lockedFor(key);
+  const wait = await lockedFor(key);
   if (wait > 0) {
     // Log a blocked attempt at most once a minute per account, so hammering a locked account can't flood the log.
-    if (user && consume(`audit:blocked:${user.id}`, 1, 60)) audit("login.blocked", user.id, ip);
+    if (user && (await consume(`audit:blocked:${user.id}`, 1, 60))) await audit("login.blocked", user.id, ip);
     return { status: "blocked", retryIn: wait };
   }
 
   if (!user) {
     await verifyDummy(password);
-    fail(key, undefined, ip);
+    await fail(key, undefined, ip);
     return { status: "fail" };
   }
   const ok = await verifyPassword(user.password_hash, password);
   if (!ok || user.disabled) {
-    fail(key, user, ip);
-    audit("login.failed", user.id, ip);
+    await fail(key, user, ip);
+    await audit("login.failed", user.id, ip);
     return { status: "fail" };
   }
   if (needsRehash(user.password_hash)) {
-    db()
-      .prepare("UPDATE users SET password_hash=? WHERE id=?")
-      .run(await hashPassword(password), user.id);
+    const h = await hashPassword(password);
+    await run(sql`UPDATE users SET password_hash = ${h} WHERE id = ${user.id}`);
   }
   if (user.totp_enabled) {
-    const token = createSession(user.id, "mfa", MFA_TTL, ip, ua);
+    const token = await createSession(user.id, "mfa", MFA_TTL, ip, ua);
     return { status: "mfa", token, ttl: MFA_TTL };
   }
-  clearLock(key);
+  await clearLock(key);
   const ttl = cfg.session_hours * 3600;
-  audit("login.ok", user.id, ip);
-  return { status: "ok", token: createSession(user.id, "full", ttl, ip, ua), ttl };
+  await audit("login.ok", user.id, ip);
+  return { status: "ok", token: await createSession(user.id, "full", ttl, ip, ua), ttl };
 }
 
 const normRecovery = (c: string) => c.replace(/[\s-]/g, "").toLowerCase();
@@ -248,29 +249,31 @@ export async function completeMfa(
   | { status: "blocked"; retryIn: number }
   | { status: "expired" }
 > {
-  if (!mfaToken) return { status: "expired" };
+  if (!mfaToken || mfaToken.length > 100 || !/^[A-Za-z0-9_-]+$/.test(mfaToken)) return { status: "expired" };
   const hash = sha256(mfaToken);
-  const s = db().prepare("SELECT * FROM sessions WHERE id_hash=? AND kind='mfa'").get(hash) as
-    { user_id: number; expires_at: number; attempts: number } | undefined;
+  // Counting the attempt and reading the session is one statement: parallel guesses can't share a count.
+  const s = await one<{ user_id: number; expires_at: number; attempts: number }>(
+    sql`UPDATE sessions SET attempts = attempts + 1 WHERE id_hash = ${hash} AND kind = 'mfa'
+        RETURNING user_id, expires_at, attempts`,
+  );
   if (!s || s.expires_at <= now()) {
-    if (s) db().prepare("DELETE FROM sessions WHERE id_hash=?").run(hash);
+    if (s) await run(sql`DELETE FROM sessions WHERE id_hash = ${hash}`);
     return { status: "expired" };
   }
-  const user = userById(s.user_id);
-  const cfg = getSettings();
+  const user = await userById(s.user_id);
+  const cfg = await getSettings();
   if (!user || user.disabled || !user.totp_enabled) return { status: "expired" };
   const key = userKey(user.id);
-  const wait = lockedFor(key);
-  if (wait > 0 || s.attempts >= MFA_MAX_ATTEMPTS) {
-    db().prepare("DELETE FROM sessions WHERE id_hash=?").run(hash);
+  const wait = await lockedFor(key);
+  if (wait > 0 || s.attempts > MFA_MAX_ATTEMPTS) {
+    await run(sql`DELETE FROM sessions WHERE id_hash = ${hash}`);
     return { status: "blocked", retryIn: wait };
   }
-  db().prepare("UPDATE sessions SET attempts=attempts+1 WHERE id_hash=?").run(hash);
 
   let ok = false;
   const clean = code.trim();
   if (/^\d{6}$/.test(clean)) {
-    for (const d of deviceRows(user.id)) {
+    for (const d of await deviceRows(user.id)) {
       let secret: string;
       try {
         secret = decrypt(d.secret_enc, `user:${user.id}:totp`);
@@ -281,9 +284,10 @@ export async function completeMfa(
       // Atomic replay protection per device: a time-step can only ever be accepted once.
       if (
         step !== null &&
-        db()
-          .prepare("UPDATE totp_devices SET last_step=?, last_used_at=? WHERE id=? AND user_id=? AND last_step<?")
-          .run(step, now(), d.id, user.id, step).changes === 1
+        (await run(
+          sql`UPDATE totp_devices SET last_step = ${step}, last_used_at = ${now()}
+              WHERE id = ${d.id} AND user_id = ${user.id} AND last_step < ${step}`,
+        )) === 1
       ) {
         ok = true;
         break;
@@ -291,29 +295,28 @@ export async function completeMfa(
     }
   } else {
     const h = hmac(normRecovery(clean));
-    ok = db()
-      .transaction(() => {
-        const list = JSON.parse(userById(user.id)!.recovery_hashes) as string[];
-        const idx = list.findIndex((x) => safeEqual(x, h));
-        if (idx < 0) return false;
-        list.splice(idx, 1); // recovery codes are single-use
-        db().prepare("UPDATE users SET recovery_hashes=? WHERE id=?").run(JSON.stringify(list), user.id);
-        return true;
-      })
-      .immediate();
-    if (ok) audit("2fa.recovery_used", user.id, ip);
+    ok = await tx(async () => {
+      const list = JSON.parse((await userById(user.id))!.recovery_hashes) as string[];
+      const idx = list.findIndex((x) => safeEqual(x, h));
+      if (idx < 0) return false;
+      list.splice(idx, 1); // recovery codes are single-use
+      await run(sql`UPDATE users SET recovery_hashes = ${JSON.stringify(list)} WHERE id = ${user.id}`);
+      return true;
+    });
+    if (ok) await audit("2fa.recovery_used", user.id, ip);
   }
   if (!ok) {
-    fail(key, user, ip);
-    audit("2fa.failed", user.id, ip);
+    await fail(key, user, ip);
+    await audit("2fa.failed", user.id, ip);
     return { status: "fail" };
   }
 
-  db().prepare("DELETE FROM sessions WHERE id_hash=?").run(hash);
-  clearLock(key);
+  // the pending session is consumed exactly once, even if two correct codes arrive together
+  if ((await run(sql`DELETE FROM sessions WHERE id_hash = ${hash}`)) !== 1) return { status: "expired" };
+  await clearLock(key);
   const ttl = cfg.session_hours * 3600;
-  audit("login.ok", user.id, ip, "2fa");
-  return { status: "ok", token: createSession(user.id, "full", ttl, ip, ua), ttl };
+  await audit("login.ok", user.id, ip, "2fa");
+  return { status: "ok", token: await createSession(user.id, "full", ttl, ip, ua), ttl };
 }
 
 /* ------------------------------------------------------------ registration */
@@ -328,30 +331,27 @@ export async function insertUser(username: string, email: string, password: stri
   const hash = await hashPassword(password);
   try {
     const t = now();
-    return Number(
-      db()
-        .prepare(
-          "INSERT INTO users(username,email,password_hash,role,created_at,password_changed_at) VALUES(?,?,?,?,?,?)",
-        )
-        .run(username, email, hash, role, t, t).lastInsertRowid,
+    const r = await one<{ id: number }>(
+      sql`INSERT INTO users(username, email, password_hash, role, created_at, password_changed_at)
+          VALUES (${username}, ${email}, ${hash}, ${role}, ${t}, ${t}) RETURNING id`,
     );
+    return r!.id;
   } catch (e) {
-    if (e instanceof Error && /UNIQUE/.test(e.message))
-      throw new HttpError(409, "That username or e-mail address is already in use.");
+    if (pgCode(e) === "23505") throw new HttpError(409, "That username or e-mail address is already in use.");
     throw e;
   }
 }
 
 export async function registerUser(username: string, email: string, password: string, ip: string | null) {
-  const cfg = getSettings();
+  const cfg = await getSettings();
   if (!cfg.allow_registration) throw new HttpError(403, "Registration is turned off.");
-  if (!consume(`register:${ip ?? "any"}`, ip ? 5 : 30, 3600))
+  if (!(await consume(`register:${ip ?? "any"}`, ip ? 5 : 30, 3600)))
     throw new HttpError(429, "Too many sign-ups. Try again later.");
   validateIdentity(username, email);
   const weak = checkPasswordStrength(password, policyFromSettings(cfg), { username, email });
   if (weak) throw new HttpError(400, weak, "password");
   const id = await insertUser(username, email, password, cfg.registration_role);
-  audit("user.registered", id, ip);
+  await audit("user.registered", id, ip);
   return id;
 }
 
@@ -359,8 +359,8 @@ export async function registerUser(username: string, email: string, password: st
 
 const SETUP_FILE = () => path.join(/* turbopackIgnore: true */ DATA_DIR, "setup-token");
 
-export function ensureSetupToken(): string | null {
-  if (userCount() > 0) {
+export async function ensureSetupToken(): Promise<string | null> {
+  if ((await userCount()) > 0) {
     rmSync(SETUP_FILE(), { force: true });
     return null;
   }
@@ -370,20 +370,20 @@ export function ensureSetupToken(): string | null {
 }
 
 export async function setupAdmin(token: string, username: string, email: string, password: string, ip: string | null) {
-  if (!ipAllowed("setup", ip, 10, 900)) throw new HttpError(429, "Too many attempts. Try again later.");
-  const expected = ensureSetupToken();
+  if (!(await ipAllowed("setup", ip, 10, 900))) throw new HttpError(429, "Too many attempts. Try again later.");
+  const expected = await ensureSetupToken();
   if (!expected) throw new HttpError(403, "Setup is already complete.");
   // Global (not per-IP) limit on wrong tokens: without a trusted proxy the client IP is unknown,
   // and a short custom WIKI_SETUP_TOKEN must not be guessable by unlimited tries.
-  if (isBlocked("setup:badtoken", 10))
+  if (await isBlocked("setup:badtoken", 10))
     throw new HttpError(429, "Too many wrong setup tokens. Try again in 15 minutes.");
   if (!safeEqual(token.trim(), expected)) {
-    recordFailure("setup:badtoken", 900);
-    audit("setup.bad_token", null, ip);
+    await recordFailure("setup:badtoken", 900);
+    await audit("setup.bad_token", null, ip);
     throw new HttpError(403, "That setup token is not correct.");
   }
   validateIdentity(username, email);
-  const policy = policyFromSettings(getSettings());
+  const policy = policyFromSettings(await getSettings());
   const weak = checkPasswordStrength(
     password,
     { ...policy, minLength: Math.max(12, policy.minLength) },
@@ -391,23 +391,19 @@ export async function setupAdmin(token: string, username: string, email: string,
   );
   if (weak) throw new HttpError(400, weak, "password");
   const hash = await hashPassword(password);
-  const id = db()
-    .transaction(() => {
-      if (userCount() > 0) throw new HttpError(403, "Setup is already complete."); // closes the race between two setup requests
-      const t = now();
-      const uid = Number(
-        db()
-          .prepare(
-            "INSERT INTO users(username,email,password_hash,role,is_owner,created_at,password_changed_at) VALUES(?,?,?,'admin',1,?,?)",
-          )
-          .run(username, email, hash, t, t).lastInsertRowid,
-      );
-      seedPages(uid, getSettings().language);
-      return uid;
-    })
-    .immediate();
+  const id = await tx(async () => {
+    // closes the race between two setup requests (serializable: the second one sees the first)
+    if ((await userCount()) > 0) throw new HttpError(403, "Setup is already complete.");
+    const t = now();
+    const r = await one<{ id: number }>(
+      sql`INSERT INTO users(username, email, password_hash, role, is_owner, created_at, password_changed_at)
+          VALUES (${username}, ${email}, ${hash}, 'admin', 1, ${t}, ${t}) RETURNING id`,
+    );
+    await seedPages(r!.id, (await getSettings()).language);
+    return r!.id;
+  });
   rmSync(SETUP_FILE(), { force: true });
-  audit("setup.admin_created", id, ip);
+  await audit("setup.admin_created", id, ip);
   return id;
 }
 
@@ -416,28 +412,26 @@ export async function setupAdmin(token: string, username: string, email: string,
 const RESET_TTL = 30 * 60;
 
 /** Always resolves quietly: callers must answer identically whether or not the e-mail exists. */
-export async function requestPasswordReset(
-  email: string,
-  ip: string | null,
-  lang: Lang = getSettings().language,
-): Promise<void> {
-  if (!getSettings().allow_password_reset || !isMailConfigured()) return;
-  if (!ipAllowed("reset:ip", ip, 10, 3600)) return;
-  if (!consume("reset:global", 300, 3600)) return; // hard ceiling, also bounds the per-address counters
-  if (!consume(`reset:mail:${email.toLowerCase()}`, 3, 3600)) return;
-  const user = db().prepare("SELECT * FROM users WHERE email=?").get(email) as UserRow | undefined;
+export async function requestPasswordReset(email: string, ip: string | null, lang?: Lang): Promise<void> {
+  const cfg = await getSettings();
+  lang ??= cfg.language;
+  if (!cfg.allow_password_reset || !(await isMailConfigured())) return;
+  if (!(await ipAllowed("reset:ip", ip, 10, 3600))) return;
+  if (!(await consume("reset:global", 300, 3600))) return; // hard ceiling, also bounds the per-address counters
+  if (!(await consume(`reset:mail:${email.toLowerCase()}`, 3, 3600))) return;
+  const user = await one<UserRow>(sql`SELECT * FROM users WHERE lower(email) = lower(${email})`);
   if (!user || user.disabled) return;
   const token = randomToken(32);
-  db().transaction(() => {
-    db().prepare("DELETE FROM reset_tokens WHERE user_id=?").run(user.id); // only the newest link works
-    db()
-      .prepare("INSERT INTO reset_tokens(token_hash,user_id,expires_at) VALUES(?,?,?)")
-      .run(sha256(token), user.id, now() + RESET_TTL);
-  })();
-  audit("reset.requested", user.id, ip);
+  await tx(async () => {
+    await run(sql`DELETE FROM reset_tokens WHERE user_id = ${user.id}`); // only the newest link works
+    await run(
+      sql`INSERT INTO reset_tokens(token_hash, user_id, expires_at) VALUES (${sha256(token)}, ${user.id}, ${now() + RESET_TTL})`,
+    );
+  });
+  await audit("reset.requested", user.id, ip);
   // The token travels in the URL fragment so it never reaches server logs or Referer headers.
   const link = `${BASE_URL}/reset#token=${token}`;
-  const site = getSettings().site_name;
+  const site = cfg.site_name;
   const t = (x: string, p?: Record<string, string | number>) => translate(lang, x, p);
   const mail = renderMail({
     site,
@@ -458,56 +452,63 @@ export async function requestPasswordReset(
 }
 
 export async function performPasswordReset(token: string, password: string, ip: string | null) {
-  if (!ipAllowed("reset:use", ip, 20, 3600)) throw new HttpError(429, "Too many attempts. Try again later.");
+  if (!(await ipAllowed("reset:use", ip, 20, 3600))) throw new HttpError(429, "Too many attempts. Try again later.");
   if (!/^[A-Za-z0-9_-]{30,100}$/.test(token)) throw new HttpError(400, "This reset link is invalid or has expired.");
-  const row = db().prepare("SELECT user_id, expires_at FROM reset_tokens WHERE token_hash=?").get(sha256(token)) as
-    { user_id: number; expires_at: number } | undefined;
+  const row = await one<{ user_id: number; expires_at: number }>(
+    sql`SELECT user_id, expires_at FROM reset_tokens WHERE token_hash = ${sha256(token)}`,
+  );
   if (!row || row.expires_at <= now()) throw new HttpError(400, "This reset link is invalid or has expired.");
-  const user = userById(row.user_id);
+  const user = await userById(row.user_id);
   if (!user || user.disabled) throw new HttpError(400, "This reset link is invalid or has expired.");
-  const weak = checkPasswordStrength(password, policyFromSettings(getSettings()), {
+  const weak = checkPasswordStrength(password, policyFromSettings(await getSettings()), {
     username: user.username,
     email: user.email,
   });
   if (weak) throw new HttpError(400, weak, "password");
   const hash = await hashPassword(password);
-  const used = db()
-    .transaction(() => {
-      // DELETE ... changes makes the token strictly single-use even under concurrency.
-      if (db().prepare("DELETE FROM reset_tokens WHERE token_hash=?").run(sha256(token)).changes !== 1) return false;
-      db().prepare("DELETE FROM reset_tokens WHERE user_id=?").run(user.id);
-      db().prepare("UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?").run(hash, now(), user.id);
-      revokeUserSessions(user.id);
-      return true;
-    })
-    .immediate();
+  const used = await tx(async () => {
+    // DELETE … rowcount makes the token strictly single-use even under concurrency.
+    if ((await run(sql`DELETE FROM reset_tokens WHERE token_hash = ${sha256(token)}`)) !== 1) return false;
+    await run(sql`DELETE FROM reset_tokens WHERE user_id = ${user.id}`);
+    await run(sql`UPDATE users SET password_hash = ${hash}, password_changed_at = ${now()} WHERE id = ${user.id}`);
+    await revokeUserSessions(user.id);
+    return true;
+  });
   if (!used) throw new HttpError(400, "This reset link is invalid or has expired.");
-  clearLock(userKey(user.id));
-  audit("password.reset", user.id, ip);
+  await clearLock(userKey(user.id));
+  await audit("password.reset", user.id, ip);
   // 2FA stays enforced: a reset never bypasses the second factor.
 }
 
 /* ----------------------------------------------------------------- account */
 
 export async function changePassword(user: SessionUser, current: string, next: string, ip: string | null) {
-  const row = userById(user.id)!;
+  const row = (await userById(user.id))!;
   if (!(await verifyPassword(row.password_hash, current)))
     throw new HttpError(403, "Your current password is not correct.", "current");
-  const weak = checkPasswordStrength(next, policyFromSettings(getSettings()), {
+  const weak = checkPasswordStrength(next, policyFromSettings(await getSettings()), {
     username: row.username,
     email: row.email,
   });
   if (weak) throw new HttpError(400, weak, "password");
-  db()
-    .prepare("UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?")
-    .run(await hashPassword(next), now(), user.id);
-  revokeUserSessions(user.id, user.sessionHash);
-  audit("password.changed", user.id, ip);
+  const h = await hashPassword(next);
+  await tx(async () => {
+    await run(sql`UPDATE users SET password_hash = ${h}, password_changed_at = ${now()} WHERE id = ${user.id}`);
+    await revokeUserSessions(user.id, user.sessionHash);
+  });
+  await audit("password.changed", user.id, ip);
 }
 
-async function requirePassword(user: SessionUser, password: string) {
-  if (!consume(`reauth:${user.id}`, 10, 900)) throw new HttpError(429, "Too many attempts. Try again later.");
-  if (!(await verifyPassword(userById(user.id)!.password_hash, password)))
+/** Re-authentication for sensitive actions; shared rate limit (10 per 15 minutes per person). */
+export async function requirePassword(user: SessionUser, password: unknown) {
+  if (!(await consume(`reauth:${user.id}`, 10, 900))) throw new HttpError(429, "Too many attempts. Try again later.");
+  const row = await userById(user.id);
+  if (
+    !row ||
+    typeof password !== "string" ||
+    password.length > 1024 ||
+    !(await verifyPassword(row.password_hash, password))
+  )
     throw new HttpError(403, "Your password is not correct.", "password");
 }
 
@@ -523,9 +524,9 @@ type DeviceRow = {
   last_used_at: number | null;
 };
 const deviceRows = (userId: number) =>
-  db().prepare("SELECT * FROM totp_devices WHERE user_id=? ORDER BY id").all(userId) as DeviceRow[];
-export const listDevices = (userId: number) =>
-  deviceRows(userId).map(({ id, name, created_at, last_used_at }) => ({ id, name, created_at, last_used_at }));
+  all<DeviceRow>(sql`SELECT * FROM totp_devices WHERE user_id = ${userId} ORDER BY id`);
+export const listDevices = async (userId: number) =>
+  (await deviceRows(userId)).map(({ id, name, created_at, last_used_at }) => ({ id, name, created_at, last_used_at }));
 
 const DEVICE_NAME_RE = /^[^\u0000-\u001f\u007f<>]{1,40}$/u;
 const cleanDeviceName = (name: unknown, fallback: string) => {
@@ -538,13 +539,12 @@ const cleanDeviceName = (name: unknown, fallback: string) => {
 /** Starts adding an authenticator (first one or another one). The secret stays pending until a code proves it works. */
 export async function beginTotpSetup(user: SessionUser, password: string) {
   await requirePassword(user, password);
-  if (deviceRows(user.id).length >= MAX_DEVICES)
+  if ((await deviceRows(user.id)).length >= MAX_DEVICES)
     throw new HttpError(400, `You can register at most ${MAX_DEVICES} authenticator devices.`);
   const secret = generateSecret();
-  db()
-    .prepare("UPDATE users SET totp_pending_enc=? WHERE id=?")
-    .run(encrypt(secret, `user:${user.id}:totp`), user.id);
-  return { secret, uri: otpauthUri(secret, user.email, getSettings().site_name.replace(/[:]/g, "") || ISSUER) };
+  await run(sql`UPDATE users SET totp_pending_enc = ${encrypt(secret, `user:${user.id}:totp`)} WHERE id = ${user.id}`);
+  const site = (await getSettings()).site_name.replace(/[:]/g, "") || ISSUER;
+  return { secret, uri: otpauthUri(secret, user.email, site) };
 }
 
 export function makeRecoveryCodes(): { plain: string[]; hashes: string[] } {
@@ -558,91 +558,95 @@ export function makeRecoveryCodes(): { plain: string[]; hashes: string[] } {
 }
 
 /** Confirms the pending authenticator. Returns fresh recovery codes for the first device, null for additional ones. */
-export function enableTotp(user: SessionUser, code: string, ip: string | null, name?: unknown): string[] | null {
-  const row = userById(user.id)!;
+export async function enableTotp(
+  user: SessionUser,
+  code: string,
+  ip: string | null,
+  name?: unknown,
+): Promise<string[] | null> {
+  const row = (await userById(user.id))!;
   if (!row.totp_pending_enc) throw new HttpError(400, "Start the setup again.");
-  if (!consume(`totp-enable:${user.id}`, 10, 900)) throw new HttpError(429, "Too many attempts. Try again later.");
+  if (!(await consume(`totp-enable:${user.id}`, 10, 900)))
+    throw new HttpError(429, "Too many attempts. Try again later.");
   const devName = cleanDeviceName(name, "Authenticator");
   const secret = decrypt(row.totp_pending_enc, `user:${user.id}:totp`);
   const step = verifyTotp(secret, code.trim());
   if (step === null)
     throw new HttpError(400, "That code didn’t match. Check the time on your phone and try again.", "code");
-  return db()
-    .transaction(() => {
-      const count = deviceRows(user.id).length;
-      if (count >= MAX_DEVICES)
-        throw new HttpError(400, `You can register at most ${MAX_DEVICES} authenticator devices.`);
-      // Only the pending secret that was just verified is consumed (a parallel setup can't swap it).
-      if (
-        db()
-          .prepare("UPDATE users SET totp_pending_enc=NULL WHERE id=? AND totp_pending_enc=?")
-          .run(user.id, row.totp_pending_enc).changes !== 1
-      )
-        throw new HttpError(400, "Start the setup again.");
-      db()
-        .prepare("INSERT INTO totp_devices(user_id,name,secret_enc,last_step,created_at) VALUES(?,?,?,?,?)")
-        .run(user.id, devName, encrypt(secret, `user:${user.id}:totp`), step, now());
-      if (count === 0) {
-        const rc = makeRecoveryCodes();
-        db()
-          .prepare("UPDATE users SET totp_enabled=1, recovery_hashes=? WHERE id=?")
-          .run(JSON.stringify(rc.hashes), user.id);
-        audit("2fa.enabled", user.id, ip, devName);
-        return rc.plain;
-      }
-      audit("2fa.device_added", user.id, ip, devName);
-      return null;
-    })
-    .immediate();
+  const pending = row.totp_pending_enc;
+  const secretEnc = encrypt(secret, `user:${user.id}:totp`);
+  const rc = makeRecoveryCodes();
+  return tx(async () => {
+    const count = (await deviceRows(user.id)).length;
+    if (count >= MAX_DEVICES)
+      throw new HttpError(400, `You can register at most ${MAX_DEVICES} authenticator devices.`);
+    // Only the pending secret that was just verified is consumed (a parallel setup can't swap it).
+    if (
+      (await run(
+        sql`UPDATE users SET totp_pending_enc = NULL WHERE id = ${user.id} AND totp_pending_enc = ${pending}`,
+      )) !== 1
+    )
+      throw new HttpError(400, "Start the setup again.");
+    await run(
+      sql`INSERT INTO totp_devices(user_id, name, secret_enc, last_step, created_at)
+          VALUES (${user.id}, ${devName}, ${secretEnc}, ${step}, ${now()})`,
+    );
+    if (count === 0) {
+      await run(
+        sql`UPDATE users SET totp_enabled = 1, recovery_hashes = ${JSON.stringify(rc.hashes)} WHERE id = ${user.id}`,
+      );
+      await audit("2fa.enabled", user.id, ip, devName);
+      return rc.plain;
+    }
+    await audit("2fa.device_added", user.id, ip, devName);
+    return null;
+  });
 }
 
-export function renameDevice(user: SessionUser, id: number, name: unknown, ip: string | null) {
+export async function renameDevice(user: SessionUser, id: number, name: unknown, ip: string | null) {
   const n = cleanDeviceName(name, "");
   if (!n) throw new HttpError(400, "Device name: up to 40 characters.", "name");
-  if (db().prepare("UPDATE totp_devices SET name=? WHERE id=? AND user_id=?").run(n, id, user.id).changes !== 1)
+  if ((await run(sql`UPDATE totp_devices SET name = ${n} WHERE id = ${id} AND user_id = ${user.id}`)) !== 1)
     throw new HttpError(404, "That device no longer exists.");
-  audit("2fa.device_renamed", user.id, ip, n);
+  await audit("2fa.device_renamed", user.id, ip, n);
 }
 
 /** Removes one authenticator. Removing the last one turns two-factor off — unless the role requires it. */
 export async function removeDevice(user: SessionUser, id: number, password: string, ip: string | null) {
   await requirePassword(user, password);
-  db()
-    .transaction(() => {
-      const devs = deviceRows(user.id);
-      const dev = devs.find((d) => d.id === id);
-      if (!dev) throw new HttpError(404, "That device no longer exists.");
-      const last = devs.length === 1;
-      if (last && mfaRequiredFor(getSettings(), userById(user.id)!.role))
-        throw new HttpError(
-          403,
-          "Two-factor authentication is required for your role. Add another device before removing this one.",
-        );
-      db().prepare("DELETE FROM totp_devices WHERE id=? AND user_id=?").run(id, user.id);
-      if (last) {
-        db()
-          .prepare("UPDATE users SET totp_enabled=0, totp_pending_enc=NULL, recovery_hashes='[]' WHERE id=?")
-          .run(user.id);
-        audit("2fa.disabled", user.id, ip, dev.name);
-      } else audit("2fa.device_removed", user.id, ip, dev.name);
-    })
-    .immediate();
+  await tx(async () => {
+    const devs = await deviceRows(user.id);
+    const dev = devs.find((d) => d.id === id);
+    if (!dev) throw new HttpError(404, "That device no longer exists.");
+    const last = devs.length === 1;
+    if (last && mfaRequiredFor(await getSettings(), (await userById(user.id))!.role))
+      throw new HttpError(
+        403,
+        "Two-factor authentication is required for your role. Add another device before removing this one.",
+      );
+    await run(sql`DELETE FROM totp_devices WHERE id = ${id} AND user_id = ${user.id}`);
+    if (last) {
+      await run(
+        sql`UPDATE users SET totp_enabled = 0, totp_pending_enc = NULL, recovery_hashes = '[]' WHERE id = ${user.id}`,
+      );
+      await audit("2fa.disabled", user.id, ip, dev.name);
+    } else await audit("2fa.device_removed", user.id, ip, dev.name);
+  });
 }
 
 /** Turns two-factor off completely (all devices, all recovery codes). */
 export async function disableTotp(user: SessionUser, password: string, ip: string | null) {
-  if (mfaRequiredFor(getSettings(), userById(user.id)!.role))
+  if (mfaRequiredFor(await getSettings(), (await userById(user.id))!.role))
     throw new HttpError(403, "Two-factor authentication is required for your role.");
   await requirePassword(user, password);
-  db().transaction(() => {
-    db().prepare("DELETE FROM totp_devices WHERE user_id=?").run(user.id);
-    db()
-      .prepare(
-        "UPDATE users SET totp_enabled=0, totp_secret_enc=NULL, totp_pending_enc=NULL, recovery_hashes='[]' WHERE id=?",
-      )
-      .run(user.id);
-  })();
-  audit("2fa.disabled", user.id, ip);
+  await tx(async () => {
+    await run(sql`DELETE FROM totp_devices WHERE user_id = ${user.id}`);
+    await run(
+      sql`UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_pending_enc = NULL, recovery_hashes = '[]'
+          WHERE id = ${user.id}`,
+    );
+  });
+  await audit("2fa.disabled", user.id, ip);
 }
 
 export async function regenerateRecoveryCodes(
@@ -653,8 +657,8 @@ export async function regenerateRecoveryCodes(
   await requirePassword(user, password);
   if (!user.totpEnabled) throw new HttpError(400, "Turn on two-factor authentication first.");
   const rc = makeRecoveryCodes();
-  db().prepare("UPDATE users SET recovery_hashes=? WHERE id=?").run(JSON.stringify(rc.hashes), user.id);
-  audit("2fa.recovery_regenerated", user.id, ip);
+  await run(sql`UPDATE users SET recovery_hashes = ${JSON.stringify(rc.hashes)} WHERE id = ${user.id}`);
+  await audit("2fa.recovery_regenerated", user.id, ip);
   return rc.plain;
 }
 
@@ -665,33 +669,34 @@ export async function updateProfile(
   user: SessionUser,
   input: { username: string; email: string; password: string },
   ip: string | null,
-  lang: Lang = getSettings().language,
+  lang?: Lang,
 ) {
+  const cfg = await getSettings();
+  lang ??= cfg.language;
   const username = input.username.trim(),
     email = input.email.trim();
   validateIdentity(username, email);
-  const row = userById(user.id)!;
+  const row = (await userById(user.id))!;
   const nameChanged = username !== row.username,
     mailChanged = email !== row.email;
   if (!nameChanged && !mailChanged) return { changed: false };
   await requirePassword(user, input.password);
   try {
-    db().transaction(() => {
-      db().prepare("UPDATE users SET username=?, email=? WHERE id=?").run(username, email, user.id);
+    await tx(async () => {
+      await run(sql`UPDATE users SET username = ${username}, email = ${email} WHERE id = ${user.id}`);
       // Reset links already sent to the old address stop working.
-      if (mailChanged) db().prepare("DELETE FROM reset_tokens WHERE user_id=?").run(user.id);
-    })();
+      if (mailChanged) await run(sql`DELETE FROM reset_tokens WHERE user_id = ${user.id}`);
+    });
   } catch (e) {
-    if (e instanceof Error && /UNIQUE/.test(e.message))
-      throw new HttpError(409, "That username or e-mail address is already in use.");
+    if (pgCode(e) === "23505") throw new HttpError(409, "That username or e-mail address is already in use.");
     throw e;
   }
-  if (nameChanged) audit("account.username_changed", user.id, ip, `${row.username} → ${username}`);
+  if (nameChanged) await audit("account.username_changed", user.id, ip, `${row.username} → ${username}`);
   if (mailChanged) {
-    audit("account.email_changed", user.id, ip);
+    await audit("account.email_changed", user.id, ip);
     // Tell the old address, so a hijacked session can't quietly move the account away.
-    if (isMailConfigured()) {
-      const site = getSettings().site_name;
+    if (await isMailConfigured()) {
+      const site = cfg.site_name;
       const t = (x: string, p?: Record<string, string | number>) => translate(lang, x, p);
       const mail = renderMail({
         site,
@@ -713,5 +718,5 @@ export async function updateProfile(
   return { changed: true };
 }
 
-export const recoveryCodesLeft = (userId: number) =>
-  (JSON.parse(userById(userId)?.recovery_hashes ?? "[]") as string[]).length;
+export const recoveryCodesLeft = async (userId: number) =>
+  (JSON.parse((await userById(userId))?.recovery_hashes ?? "[]") as string[]).length;

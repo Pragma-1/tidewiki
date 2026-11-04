@@ -29,12 +29,34 @@ if (typeof process.getuid === "function" && process.getuid() === 0) {
     gid = id("PGID");
   if (uid === 0 || gid === 0) die("PUID/PGID 0 (root) is not allowed. Use a normal user id such as 1000.");
 
-  const data = process.env.WIKI_DATA_DIR || "/data";
-  fs.mkdirSync(data, { recursive: true, mode: 0o700 });
-  const st = fs.statSync(data);
-  if (st.uid !== uid || st.gid !== gid) {
-    console.log(`[tidewiki] Setting ownership of ${data} to ${uid}:${gid}`);
-    chownTree(data, uid, gid);
+  const own = (dir) => {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = fs.statSync(dir);
+    if (st.uid !== uid || st.gid !== gid) {
+      console.log(`[tidewiki] Setting ownership of ${dir} to ${uid}:${gid}`);
+      chownTree(dir, uid, gid);
+    }
+  };
+  own(process.env.WIKI_DATA_DIR || "/data");
+
+  // A separate backup folder (another disk, a NAS share). Never a system path: it gets chown -R.
+  const bdir = (process.env.WIKI_BACKUP_DIR || "").trim();
+  if (bdir) {
+    const norm = path.resolve(bdir);
+    if (
+      !path.isAbsolute(bdir) ||
+      norm.split("/").filter(Boolean).length < 1 ||
+      /^\/(bin|boot|dev|etc|lib|lib64|proc|root|run|sbin|sys|usr|var|app|tmp)(\/|$)/.test(norm)
+    )
+      die(`WIKI_BACKUP_DIR must be an absolute path to a dedicated folder such as /backups, got "${bdir}".`);
+    try {
+      own(norm);
+    } catch (e) {
+      // e.g. an NFS share with root squashing: the share must already belong to PUID:PGID
+      console.warn(
+        `[tidewiki] Could not set ownership of ${norm} (${e.code || e.message}); make sure it belongs to ${uid}:${gid}.`,
+      );
+    }
   }
 
   process.setgroups([]);

@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { Shell } from "@/components/shell";
+import { connection } from "next/server";
 import { getT } from "@/lib/i18n-server";
 export default async function NotFound() {
+  await connection(); // rendered per request (it shows the page tree), never at build time
   const t = await getT();
   return (
     <Shell live={false}>

@@ -4,7 +4,9 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import pg from "pg";
+import { appEnv, createDatabase, startCluster, stopCluster } from "./pg-cluster.mjs";
 import { unzipSync, zipSync, strToU8 } from "fflate";
 import { createHmac } from "node:crypto";
 import { mkdtempSync, existsSync, statSync } from "node:fs";
@@ -15,6 +17,9 @@ const SERVER = process.env.E2E_SERVER_JS || path.resolve(import.meta.dirname, ".
 const PORT = 3100 + Math.floor(Math.random() * 500);
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA = mkdtempSync(path.join(tmpdir(), "tidewiki-e2e-"));
+// a throw-away PostgreSQL; the server connects as an unprivileged role, like in production
+const cluster = await startCluster();
+const DBNAME = await createDatabase(cluster);
 const env = {
   PATH: process.env.PATH,
   NODE_ENV: "production",
@@ -22,6 +27,22 @@ const env = {
   HOSTNAME: "127.0.0.1",
   WIKI_DATA_DIR: DATA,
   WIKI_BASE_URL: BASE,
+  ...appEnv(cluster, DBNAME),
+};
+const dbq = async (text, params = []) => {
+  const c = new pg.Client({
+    host: cluster.host,
+    port: cluster.port,
+    user: "postgres",
+    password: cluster.superPw,
+    database: DBNAME,
+  });
+  await c.connect();
+  try {
+    return (await c.query(text, params)).rows;
+  } finally {
+    await c.end();
+  }
 };
 if (process.env.E2E_BLANK)
   Object.assign(env, {
@@ -803,6 +824,417 @@ try {
     "rail offers 'Import .md' next to 'New page'",
   );
 
+  console.log("• trash, versions, backups");
+  {
+    const rawz = (c, method, url, body, origin = BASE) =>
+      fetch(BASE + url, {
+        method,
+        headers: {
+          origin,
+          "content-type": "application/zip",
+          cookie: Object.entries(c.jar)
+            .map(([k, v]) => `${k}=${v}`)
+            .join("; "),
+        },
+        body,
+      });
+    // an editor and a second administrator who is not the owner
+    ok(
+      (
+        await admin.req("POST", "/api/users", {
+          username: "edda",
+          email: "edda@example.com",
+          role: "editor",
+          password: PW,
+        })
+      ).status === 201 &&
+        (
+          await admin.req("POST", "/api/users", {
+            username: "eve",
+            email: "eve@example.com",
+            role: "admin",
+            password: PW,
+          })
+        ).status === 201,
+      "editor and second admin created",
+    );
+    const edda = new Client(),
+      eve = new Client();
+    await edda.req("POST", "/api/auth/login", { username: "edda", password: PW });
+    await eve.req("POST", "/api/auth/login", { username: "eve", password: PW });
+
+    // --- versions: edit summaries
+    const vp = await edda.req("POST", "/api/pages", { title: "Versionen", content: "eins", comment: "Erste Fassung" });
+    ok(vp.status === 201, "page created with an edit summary");
+    const vs = vp.json.slug;
+    const save = (c, content, rev, extra = {}) =>
+      c.req("PUT", `/api/pages/${vs}`, { title: "Versionen", content, parentId: null, expectedRev: rev, ...extra });
+    ok((await save(edda, "zwei", 1, { comment: "a\nb" })).status === 400, "summary with a line break is refused");
+    ok((await save(edda, "zwei", 1, { comment: "x".repeat(201) })).status === 400, "overlong summary is refused");
+    ok((await save(edda, "zwei", 1, { comment: 42 })).status === 400, "non-text summary is refused");
+    ok((await save(edda, "zwei", 1, { comment: "a‮b" })).status === 400, "bidi override in summary is refused");
+    ok(
+      (await save(edda, "zwei", 1, { comment: '<img src=x onerror="alert(1)">' })).status === 200 &&
+        (await save(edda, "drei", 2)).status === 200,
+      "two more versions",
+    );
+    const vh = await edda.req("GET", `/w/${vs}/history`);
+    ok(
+      vh.status === 200 &&
+        vh.text.includes("Erste Fassung") &&
+        vh.text.includes("&lt;img src=x") &&
+        !/<img src=x/.test(vh.text),
+      "summaries show in the history, as text",
+    );
+    ok(
+      vh.text.includes(`/api/pages/${vs}/export?rev=1`) && vh.text.includes(`from=1&amp;to=3`),
+      "per-version download and compare-with-current links",
+    );
+    ok((await edda.req("GET", "/changes")).text.includes("Erste Fassung"), "summaries show in recent changes");
+
+    // --- versions: restore a specific version
+    const rv = (c, body, origin) => c.req("POST", `/api/pages/${vs}/restore`, body, origin ? { origin } : undefined);
+    ok((await rv(anon, { rev: 1, expectedRev: 3 })).status === 401, "version restore needs sign-in");
+    ok((await rv(bob, { rev: 1, expectedRev: 3 })).status === 403, "viewers can't restore versions");
+    ok(
+      (await rv(edda, { rev: 1, expectedRev: 3 }, "https://evil.example")).status === 403,
+      "version restore is CSRF-protected",
+    );
+    for (const bad of [{ rev: "1", expectedRev: 3 }, { rev: 1.5, expectedRev: 3 }, { rev: 1 }, [], null])
+      ok([400, 404].includes((await rv(edda, bad)).status), `bad restore body refused (${JSON.stringify(bad)})`);
+    ok((await rv(edda, { rev: 999, expectedRev: 3 })).status === 404, "unknown version → 404");
+    ok((await rv(edda, { rev: -1, expectedRev: 3 })).status === 404, "negative version → 404");
+    ok((await rv(edda, { rev: 1, expectedRev: 2 })).status === 409, "stale editor → conflict");
+    const r1 = await rv(edda, { rev: 1, expectedRev: 3 });
+    ok(r1.status === 200 && r1.json.rev === 4, "version 1 restored as version 4");
+    ok((await anon.req("GET", `/w/${vs}`)).text.includes("eins"), "the page shows the restored text");
+    ok((await rv(edda, { rev: 1, expectedRev: 4 })).status === 409, "restoring an identical version is refused");
+    ok(
+      (await edda.req("GET", `/w/${vs}/history?rev=4`)).text.includes("wiederhergestellt aus Version 1"),
+      "history records where a restore came from",
+    );
+    const v2 = await edda.req("GET", `/api/pages/${vs}/export?rev=2`, undefined, { raw: true });
+    ok(
+      v2.status === 200 &&
+        (await v2.text()).includes("zwei") &&
+        /filename="versionen-v2\.md"/.test(v2.headers.get("content-disposition")),
+      "a single version downloads as .md",
+    );
+    for (const q of ["abc", "0", "-1", "1e3", "99999", "%00", "1x", "+1"])
+      ok((await edda.req("GET", `/api/pages/${vs}/export?rev=${q}`)).status === 404, `bad ?rev=${q} → 404`);
+    ok((await anon.req("GET", `/api/pages/${vs}/export?rev=1`)).status === 401, "old versions need sign-in");
+
+    // --- trash
+    const tp2 = await edda.req("POST", "/api/pages", { title: "Wegwerfseite", content: "Eindeutig Schnabeltier" });
+    const tslug = tp2.json.slug;
+    ok((await bob.req("DELETE", `/api/pages/${tslug}`)).status === 403, "viewers can't delete");
+    ok((await eve.req("GET", "/api/trash")).status === 200, "admins see the trash");
+    const before = (await edda.req("GET", "/api/trash")).json.items.length;
+    ok((await edda.req("DELETE", `/api/pages/${tslug}`)).status === 200, "author deletes the page");
+    ok((await anon.req("GET", `/w/${tslug}`)).status === 404, "deleted page is gone from the wiki");
+    ok(
+      !(await anon.req("GET", "/api/search?q=schnabeltier")).json.hits.some((h) => h.slug === tslug),
+      "…and from search",
+    );
+    ok(!(await anon.req("GET", "/")).text.includes(`/w/${tslug}"`), "…and from the page tree");
+    const tl = await edda.req("GET", "/api/trash");
+    const titem = tl.json.items.find((i) => i.slug === tslug);
+    ok(
+      tl.status === 200 && tl.json.items.length === before + 1 && !!titem && tl.json.days === 30,
+      "it waits in the trash",
+    );
+    ok(
+      (await anon.req("GET", "/api/trash")).status === 401 && (await bob.req("GET", "/api/trash")).status === 403,
+      "the trash is for editors and up",
+    );
+    ok(
+      (await bob.req("GET", "/trash")).status === 307 &&
+        (await bob.req("GET", `/trash/${titem.id}`)).status === 307 &&
+        (await anon.req("GET", "/trash")).status === 307,
+      "trash pages redirect viewers and guests",
+    );
+    ok(!(await bob.req("GET", "/")).text.includes('href="/trash"'), "viewers have no trash link");
+    const tpage = await edda.req("GET", "/trash");
+    ok(
+      tpage.status === 200 && tpage.text.includes("Wegwerfseite") && tpage.text.includes('href="/trash"'),
+      "trash page lists it",
+    );
+    const tprev = await edda.req("GET", `/trash/${titem.id}`);
+    ok(tprev.status === 200 && tprev.text.includes("Schnabeltier"), "deleted page can be previewed");
+    for (const bad of ["0", "abc", "-1", "1.5", "99999999999999999999", "1%00"])
+      ok((await edda.req("GET", `/trash/${bad}`)).status === 404, `bad trash id /trash/${bad} → 404`);
+    ok((await edda.req("DELETE", `/api/trash/${titem.id}`)).status === 403, "editors can't purge");
+    ok((await edda.req("DELETE", "/api/trash")).status === 403, "editors can't empty the trash");
+    ok(
+      (await bob.req("POST", `/api/trash/${titem.id}/restore`)).status === 403 &&
+        (await anon.req("POST", `/api/trash/${titem.id}/restore`)).status === 401,
+      "viewers and guests can't restore",
+    );
+    ok(
+      (await edda.req("POST", `/api/trash/${titem.id}/restore`, undefined, { origin: "https://evil.example" }))
+        .status === 403,
+      "trash restore is CSRF-protected",
+    );
+    for (const bad of ["0", "abc", "1;DROP", "999999"])
+      ok((await edda.req("POST", `/api/trash/${bad}/restore`)).status === 404, `restore of trash id ${bad} → 404`);
+    const tr = await edda.req("POST", `/api/trash/${titem.id}/restore`);
+    ok(tr.status === 200 && tr.json.slug === tslug && tr.json.slugChanged === false, "editor restores it");
+    ok((await anon.req("GET", `/w/${tslug}`)).text.includes("Schnabeltier"), "the page is back");
+    ok(
+      (await anon.req("GET", "/api/search?q=schnabeltier")).json.hits.some((h) => h.slug === tslug),
+      "…and searchable again",
+    );
+    ok((await edda.req("POST", `/api/trash/${titem.id}/restore`)).status === 404, "a second restore → 404");
+    // purge by an admin
+    await edda.req("DELETE", `/api/pages/${tslug}`);
+    const t2 = (await edda.req("GET", "/api/trash")).json.items.find((i) => i.slug === tslug);
+    ok((await eve.req("DELETE", `/api/trash/${t2.id}`)).status === 200, "an admin purges it");
+    ok(!(await eve.req("GET", "/api/trash")).json.items.some((i) => i.slug === tslug), "purged for good");
+    const aud = await admin.req("GET", "/api/audit?category=pages&limit=50");
+    ok(
+      ["page.trashed", "page.restored", "page.purged", "page.version_restored"].every(
+        (e) => aud.json.rows?.some?.((r) => r.event === e) ?? aud.text.includes(e),
+      ),
+      "trash and restore actions are in the security log",
+    );
+
+    // --- backups
+    ok(
+      (await anon.req("GET", "/api/backups")).status === 401 &&
+        (await bob.req("GET", "/api/backups")).status === 403 &&
+        (await edda.req("GET", "/api/backups")).status === 403,
+      "backups are for administrators",
+    );
+    const b1 = await eve.req("POST", "/api/backups");
+    ok(b1.status === 201 && /^\d{8}-\d{6}-[0-9a-f]{6}$/.test(b1.json.id), "any admin can back up now");
+    const bl = await eve.req("GET", "/api/backups");
+    ok(
+      bl.status === 200 &&
+        bl.json.items.some((b) => b.id === b1.json.id && b.reason === "manual" && b.counts.pages > 0),
+      "backup is listed with its contents",
+    );
+    ok(
+      (await eve.req("GET", `/api/backups/${b1.json.id}/download`)).status === 403 &&
+        (await eve.req("DELETE", `/api/backups/${b1.json.id}`)).status === 403 &&
+        (await eve.req("POST", `/api/backups/${b1.json.id}/restore`, { password: PW })).status === 403 &&
+        (await rawz(eve, "POST", "/api/backups/upload", "x")).status === 403,
+      "download, delete, restore and upload are owner-only",
+    );
+    ok(
+      (await eve.req("PUT", "/api/settings", { backup_keep: 1 })).status === 403 &&
+        (await admin.req("PUT", "/api/settings", { backup_keep: 20 })).status === 200,
+      "only the owner changes the backup schedule",
+    );
+    ok((await eve.req("GET", "/settings?tab=backups")).status === 200, "/settings?tab=backups renders");
+    // where backups go: the owner, with password, after a live test; never through the general settings
+    ok(
+      (await eve.req("PUT", "/api/backups/target", { action: "test" })).status === 403 &&
+        (await admin.req("PUT", "/api/backups/target", { action: "test" })).status === 200 &&
+        (await admin.req("PUT", "/api/settings", { backup_target: "s3" })).status === 400 &&
+        (await admin.req("PUT", "/api/settings", { backup_s3_endpoint: "http://evil" })).status === 400,
+      "backup storage: owner only, and not via the general settings",
+    );
+    const s3try = (password, endpoint) =>
+      admin.req("PUT", "/api/backups/target", {
+        password,
+        target: "s3",
+        s3: { endpoint, region: "eu-1", bucket: "wiki", prefix: "tw/", access_key: "a", secret: "s" },
+      });
+    ok(
+      (await s3try("wrong-wrong-wrong-1", "https://s3.example.org")).status === 403,
+      "storage change needs the password",
+    );
+    ok(
+      (await s3try(PW, "http://169.254.169.254")).status === 400 &&
+        (await s3try(PW, "file:///etc/passwd")).status === 400 &&
+        (await s3try(PW, "https://user:pw@s3.example.org")).status === 400,
+      "S3 endpoint: no metadata addresses, no other schemes, no credentials in the URL",
+    );
+    ok((await admin.req("GET", "/api/backups/target")).json.target === "local", "a refused change saves nothing");
+
+    // look inside: pages and accounts, each marked whether it still exists
+    const inside = await eve.req("GET", `/api/backups/${b1.json.id}`);
+    const vpage = inside.json.pages?.find((p) => p.slug === vs);
+    ok(
+      inside.status === 200 && !!vpage && vpage.exists && inside.json.users.some((u) => u.username === "edda"),
+      "an admin can look inside a backup",
+    );
+    ok((await edda.req("GET", `/api/backups/${b1.json.id}`)).status === 403, "editors can't look inside backups");
+    ok((await eve.req("POST", `/api/backups/${b1.json.id}/verify`)).json.ok === true, "verify: the backup is intact");
+    // restore one page: the backup's text becomes a new version on top
+    const r0 = Number((await dbq("SELECT rev FROM pages WHERE slug=$1", [vs]))[0].rev);
+    ok((await save(edda, "überschrieben", r0)).status === 200, "page changed after the backup");
+    const curRev = r0 + 1;
+    const rp = await eve.req("POST", `/api/backups/${b1.json.id}/pages/${vpage.id}`);
+    ok(
+      rp.status === 200 && rp.json.mode === "version",
+      `admin restores one page as a new version (${rp.text.slice(0, 80)})`,
+    );
+    ok(
+      Number((await dbq("SELECT rev FROM pages WHERE slug=$1", [vs]))[0].rev) === Number(curRev) + 1,
+      "nothing was overwritten: one version more",
+    );
+    ok(
+      (await edda.req("POST", `/api/backups/${b1.json.id}/pages/${vpage.id}`)).status === 403,
+      "editors can't restore from backups",
+    );
+    for (const bad of ["0", "abc", "1e3", "99999999999999999999", "-1"])
+      ok(
+        [404].includes((await eve.req("POST", `/api/backups/${b1.json.id}/pages/${bad}`)).status),
+        `bad page id ${bad} → 404`,
+      );
+    // restore one account: only deleted ones; administrators only by the owner
+    const tmpU = await admin.req("POST", "/api/users", {
+      username: "tempo",
+      email: "tempo@example.com",
+      role: "editor",
+      password: PW,
+    });
+    const b2 = await admin.req("POST", "/api/backups");
+    ok(
+      (await eve.req("POST", `/api/backups/${b2.json.id}/users/${tmpU.json.id}`)).status === 409,
+      "an existing account is never overwritten",
+    );
+    await admin.req("DELETE", `/api/users/${tmpU.json.id}`);
+    const ru = await eve.req("POST", `/api/backups/${b2.json.id}/users/${tmpU.json.id}`);
+    ok(ru.status === 200 && ru.json.username === "tempo", "an admin brings back a deleted editor");
+    const tempoLogin = await new Client().req("POST", "/api/auth/login", { username: "tempo", password: PW });
+    ok(tempoLogin.status === 200, "…who signs in with the old password");
+    const eveId = (await dbq("SELECT id FROM users WHERE username='eve'"))[0].id;
+    ok(
+      (await eve.req("POST", `/api/backups/${b2.json.id}/users/${eveId}`)).status === 403 && // admins: owner only
+        (await admin.req("POST", `/api/backups/${b2.json.id}/users/${eveId}`)).status === 409 && // exists
+        (await edda.req("POST", `/api/backups/${b2.json.id}/users/${eveId}`)).status === 403,
+      "account restore: admins only, never over an existing account",
+    );
+
+    const dl = await admin.req("GET", `/api/backups/${b2.json.id}/download`, undefined, { raw: true });
+    const dlBuf = Buffer.from(await dl.arrayBuffer());
+    const dlFiles = unzipSync(new Uint8Array(dlBuf));
+    ok(
+      dl.status === 200 &&
+        /attachment; filename="tidewiki-backup-/.test(dl.headers.get("content-disposition")) &&
+        `${b2.json.id}.data` in dlFiles &&
+        `${b2.json.id}.manifest` in dlFiles &&
+        Object.keys(dlFiles).some((k) => k.startsWith("objects/")),
+      "owner downloads a backup ZIP (manifest, data, files)",
+    );
+    {
+      const blob = Buffer.concat(Object.values(dlFiles).map((u) => Buffer.from(u)));
+      ok(
+        !["edda@example.com", "$argon2id$", "Versionen", "tempo"].some((x) => blob.includes(Buffer.from(x))),
+        "the downloaded backup is ciphertext only (no names, hashes or page text)",
+      );
+    }
+    for (const id of ["..", "..%2F..%2Fwiki", "20260101-000000-zzzzzz", "pool", "%00", "x".repeat(300)]) {
+      const s1 = (await admin.req("GET", `/api/backups/${id}/download`)).status;
+      const s2 = (await admin.req("DELETE", `/api/backups/${id}`)).status;
+      // ".." is collapsed by the URL parser before it reaches a route: then "not served" is the bar
+      const notServed = (x) => x !== 200 && x < 500;
+      ok(notServed(s1) && notServed(s2), `bad backup id ${id.slice(0, 20)} → ${s1}/${s2}`);
+    }
+    // upload: a backup already in the list is refused; after deleting it, it comes back in
+    ok((await rawz(admin, "POST", "/api/backups/upload", dlBuf)).status === 409, "a backup can't be uploaded twice");
+    ok(
+      (await admin.req("DELETE", `/api/backups/${b2.json.id}`)).status === 200 &&
+        !(await admin.req("GET", "/api/backups")).json.items.some((b) => b.id === b2.json.id),
+      "owner deletes a backup",
+    );
+    const upOk = await rawz(admin, "POST", "/api/backups/upload", dlBuf);
+    ok(
+      upOk.status === 201 && (await upOk.json()).id === b2.json.id,
+      `downloaded backup uploads again (${upOk.status})`,
+    );
+    ok(
+      (await rawz(admin, "POST", "/api/backups/upload", dlBuf, "https://evil.example")).status === 403,
+      "backup upload is CSRF-protected",
+    );
+    const d2 = dlFiles[`${b2.json.id}.data`],
+      m2 = dlFiles[`${b2.json.id}.manifest`];
+    const tampered = Buffer.from(d2);
+    tampered[tampered.length - 30] ^= 1;
+    for (const [label, files] of Object.entries({
+      modified: { [`${b2.json.id}.data`]: tampered, [`${b2.json.id}.manifest`]: m2 },
+      "renamed (id is authenticated)": { "20200101-000000-aaaaaa.data": d2, "20200101-000000-aaaaaa.manifest": m2 },
+      "path traversal": { [`${b2.json.id}.data`]: d2, "../../evil": strToU8("x") },
+      "stray file": { [`${b2.json.id}.data`]: d2, "run.sh": strToU8("x") },
+      "not a backup": { "wiki.db": strToU8("hello") },
+      empty: {},
+    })) {
+      const r = await rawz(admin, "POST", "/api/backups/upload", Buffer.from(zipSync(files)));
+      ok([400, 409].includes(r.status), `hostile backup refused: ${label} (${r.status})`);
+    }
+    ok(
+      (await rawz(admin, "POST", "/api/backups/upload", Buffer.from("not a zip"))).status === 400,
+      "garbage upload refused",
+    );
+    // password confirmations are capped (10 per 15 minutes): guessing the owner's password through
+    // the restore endpoint runs into the limit — and then even the right password is refused
+    {
+      let codes = [];
+      for (let i = 0; i < 11; i++)
+        codes.push((await eve.req("POST", `/api/backups/${b1.json.id}/restore`, { password: "guess-" + i })).status);
+      ok(
+        codes.every((c) => c === 403),
+        "non-owners are refused before any password check",
+      );
+      const ev = new Client();
+      await ev.req("POST", "/api/auth/login", { username: "edda", password: PW });
+      codes = [];
+      for (let i = 0; i < 11; i++)
+        codes.push((await ev.req("POST", "/api/account/2fa/setup", { password: "guess-" + i })).status);
+      const after = (await ev.req("POST", "/api/account/2fa/setup", { password: PW })).status;
+      ok(
+        codes.slice(0, 10).every((c) => c === 403) && codes[10] === 429 && after === 429,
+        `password confirmations are rate-limited (${codes.join(",")} → ${after})`,
+      );
+    }
+    // restore: password required; everything after the backup disappears; everyone is signed out
+    const after = await edda.req("POST", "/api/pages", { title: "Nach der Sicherung", content: "verschwindet" });
+    ok(
+      (await admin.req("POST", `/api/backups/${b1.json.id}/restore`, { password: "wrong-wrong-wrong-1" })).status ===
+        403,
+      "restore needs the owner's password",
+    );
+    ok(
+      (await admin.req("POST", `/api/backups/${b1.json.id}/restore`, {})).status === 403,
+      "restore without password refused",
+    );
+    ok(
+      (
+        await admin.req(
+          "POST",
+          `/api/backups/${b1.json.id}/restore`,
+          { password: PW },
+          { origin: "https://evil.example" },
+        )
+      ).status === 403,
+      "restore is CSRF-protected",
+    );
+    const rs = await admin.req("POST", `/api/backups/${b1.json.id}/restore`, { password: PW });
+    ok(rs.status === 200 && /^\d{8}-/.test(rs.json.safety), `backup restored (${rs.status} ${rs.text.slice(0, 120)})`);
+    ok((await anon.req("GET", `/w/${after.json.slug}`)).status === 404, "a page created after the backup is gone");
+    ok((await anon.req("GET", `/w/${vs}`)).status === 200, "pages from the backup are there");
+    ok(
+      (await admin.req("GET", "/api/backups")).status === 401 && (await edda.req("GET", "/api/trash")).status === 401,
+      "everyone was signed out",
+    );
+    ok((await anon.req("GET", "/login?restored=1")).text.includes("wiederhergestellt"), "login explains why");
+    for (const c of [admin, bob, edda, eve]) c.jar = {};
+    await admin.req("POST", "/api/auth/login", { username: "admin", password: PW });
+    await bob.req("POST", "/api/auth/login", { username: "bob", password: PW });
+    const bl2 = await admin.req("GET", "/api/backups");
+    ok(
+      bl2.status === 200 && bl2.json.items.some((b) => b.id === rs.json.safety && b.reason === "pre-restore"),
+      "a safety backup of the state before the restore exists",
+    );
+    ok(
+      (await admin.req("GET", "/api/audit?limit=20")).text.includes("admin.backup_restored"),
+      "the restore is in the security log of the restored wiki",
+    );
+    ok((statSync(path.join(DATA, "backups")).mode & 0o777) === 0o700, "backup folder is private (0700)");
+  }
+
   console.log("• profile and own sessions");
   ok(
     (
@@ -977,6 +1409,21 @@ try {
     ["POST", "/api/settings/mail-test"],
     ["GET", "/api/search?q=" + encodeURIComponent("*a*a*a*a*a*a*a*a*b " + '"x'.repeat(40))],
     ["GET", "/search?q=%22%2A%25_%5C"],
+    ["PUT", "/api/pages/teil"],
+    ["POST", "/api/pages/teil/restore"],
+    ["POST", "/api/trash/1/restore"],
+    ["DELETE", "/api/trash/abc"],
+    ["POST", "/api/backups/20260101-000000-abcdef/restore"],
+    ["POST", "/api/backups/20260101-000000-abcdef/pages/1"],
+    ["POST", "/api/backups/20260101-000000-abcdef/users/1"],
+    ["POST", "/api/backups/20260101-000000-abcdef/verify"],
+    ["GET", "/api/backups/20260101-000000-abcdef"],
+    ["PUT", "/api/backups/target"],
+    ["GET", "/api/search?q=" + encodeURIComponent("'||pg_sleep(5)||'")],
+    ["GET", "/api/audit?q=" + encodeURIComponent("%' OR '1'='1") + "&user=1;DROP TABLE users"],
+    ["DELETE", "/api/backups/..%2F..%2Fwiki"],
+    ["GET", "/api/backups/%2e%2e/download"],
+    ["GET", "/api/pages/teil/export?rev=%ff%00"],
   ];
   const junk = [
     null,
@@ -991,6 +1438,14 @@ try {
     { constructor: { prototype: { x: 1 } } },
     "<script>alert(1)</script>",
     { a: { b: { c: { d: {} } } } },
+    // aimed at the database layer: integers beyond int4/int8/2^53, SQL, NUL inside nested values
+    2 ** 31,
+    2 ** 63,
+    -(2 ** 63),
+    9007199254740993,
+    "'; DROP TABLE users; --",
+    "1) OR (1=1",
+    { slug: "a\u0000b", id: "1 OR 1=1" },
   ];
   const rnd = (n) => Math.floor(Math.random() * n);
   let fuzz500 = 0,
@@ -1170,6 +1625,12 @@ try {
   );
 
   console.log("• two-factor required per role (owner vs. other admins)");
+  {
+    // By now the owner has confirmed their password ~10 times in this run (devices, restore, fuzzing):
+    // exactly the real limit of 10 per 15 minutes. Start this section with a fresh budget instead of
+    // depending on how many fuzz requests got that far — the limit itself is tested in the backup section.
+    await dbq("DELETE FROM rate_limits WHERE key LIKE 'reauth:%'");
+  }
   const dora = new Client();
   ok(
     (await l3.req("POST", "/api/users", { username: "dora", email: "dora@example.com", role: "admin", password: PW }))
@@ -1204,9 +1665,10 @@ try {
     (await l3.req("DELETE", `/api/account/2fa/devices/${devIds[0]}`, { password: PW })).status === 200,
     "owner removes one of two devices",
   );
+  const lastDev = await l3.req("DELETE", `/api/account/2fa/devices/${devIds[1]}`, { password: PW });
   ok(
-    (await l3.req("DELETE", `/api/account/2fa/devices/${devIds[1]}`, { password: PW })).status === 403,
-    "the last device can't be removed while the role requires 2FA",
+    lastDev.status === 403,
+    `the last device can't be removed while the role requires 2FA (${lastDev.status} ${lastDev.text.slice(0, 100)})`,
   );
   ok(
     (await l3.req("PUT", "/api/settings", { require_2fa_admin: false })).status === 200,
@@ -1244,12 +1706,18 @@ try {
     "password never logged",
   );
   ok(!log.includes(PW) && !log.includes(su.json.secret), "no secrets in server log");
+  {
+    const unexpected = log.split("\n").filter((l) => /unexpected failure|Unhandled|uncaught/i.test(l));
+    ok(unexpected.length === 0, `no unexpected server errors in the whole run (${unexpected.slice(0, 3).join(" | ")})`);
+  }
 } catch (e) {
   failed++;
   console.log("  CRASH:", e);
 } finally {
   srv.kill();
   smtp.close();
+  await new Promise((r) => setTimeout(r, 300));
+  stopCluster(cluster);
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) console.log("--- server log ---\n" + log.slice(-2000));

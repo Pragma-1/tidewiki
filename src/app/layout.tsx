@@ -18,7 +18,7 @@ export const viewport: Viewport = {
   ],
 };
 export async function generateMetadata(): Promise<Metadata> {
-  const name = getSettings().site_name;
+  const name = (await getSettings()).site_name;
   return {
     title: { default: name, template: `%s · ${name}` },
     description: translate(await getLang(), "A self-hosted wiki."),

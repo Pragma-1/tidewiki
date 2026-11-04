@@ -2299,7 +2299,7 @@ dialog.confirm-dlg[open] .confirm-box {
 }
 .history-grid {
   display: grid;
-  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 27rem) minmax(0, 1fr);
   gap: 2rem;
   align-items: start;
 }
@@ -2316,6 +2316,60 @@ dialog.confirm-dlg[open] .confirm-box {
 }
 .rev-main {
   display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 0.1rem;
+}
+.rev-main .badge {
+  margin-left: 0.4rem;
+}
+.rev-list li.rev-active {
+  background: var(--accent-soft);
+  border-radius: 0.5rem;
+}
+.rev-actions {
+  display: inline-flex;
+  gap: 0.05rem;
+  flex-shrink: 0;
+}
+.rev-comment {
+  font-size: 0.86rem;
+  color: var(--ink);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+.rev-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+.editor-save {
+  flex: 1;
+  justify-content: flex-end;
+}
+.edit-summary {
+  flex: 1;
+  max-width: 26rem;
+  min-width: 12rem;
+}
+.rail-link .count {
+  margin-left: auto;
+  min-width: 1.4rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-size: 0.75rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.trash-banner {
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.8rem;
 }
 .diff-body {
   font-family: var(--mono);
@@ -2615,4 +2669,51 @@ td.neg {
   table.users td:nth-child(5) {
     display: none;
   }
+}
+
+/* backups: storage choice, backup contents dialog */
+dialog.confirm-dlg.wide-dlg {
+  width: min(52rem, calc(100vw - 2rem));
+}
+.inside-list {
+  max-height: min(60vh, 34rem);
+  overflow-y: auto;
+  margin-top: 0.8rem;
+}
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+.seg-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+.seg-opt.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.seg-opt input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.2rem 1rem;
+  align-items: end;
+}
+.inside-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.8rem;
 }

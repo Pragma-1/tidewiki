@@ -16,7 +16,7 @@ export default async function NewPage({
   await gate("edit");
   const sp = await searchParams;
   const p = sp.parent;
-  const parents = parentOptions(getTree());
+  const parents = parentOptions(await getTree());
   const parentId = p && /^\d{1,9}$/.test(p) && parents.some((x) => x.id === Number(p)) ? Number(p) : null;
   return (
     <Shell live={false}>

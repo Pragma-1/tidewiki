@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export const GET = api("admin", async ({ req, user, ip, t }) => {
   const f = parseAuditFilter(req.nextUrl.searchParams);
-  const rows = exportAudit(f).map((a) => ({
+  const rows = (await exportAudit(f)).map((a) => ({
     id: eventId(a.id),
     time: new Date(a.ts * 1000).toISOString(),
     event: a.event,
@@ -16,7 +16,7 @@ export const GET = api("admin", async ({ req, user, ip, t }) => {
     ip: a.ip ?? "",
     detail: a.detail ?? "",
   }));
-  audit(
+  await audit(
     "admin.export",
     user!.id,
     ip,

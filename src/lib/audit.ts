@@ -1,19 +1,22 @@
-import { db, now } from "./db";
+import { all, one, run, sql, Sql, now } from "./db";
 import { translate } from "./i18n";
 import { CATEGORIES, EVENT_LABELS, type AuditRow, type Category } from "./audit-shared";
 export { CATEGORIES, EVENT_LABELS, eventId, type AuditRow, type Category } from "./audit-shared";
 
 /** Security-relevant events only. Never put secrets, passwords or tokens into `detail`. */
-export function audit(
+export async function audit(
   event: string,
   userId: number | null,
   ip: string | null,
   detail?: string,
   targetId?: number | null,
 ) {
-  db()
-    .prepare("INSERT INTO audit_log(ts,user_id,event,ip,detail,target_id) VALUES(?,?,?,?,?,?)")
-    .run(now(), userId, event, ip, detail ? detail.slice(0, 300) : null, targetId ?? null);
+  // control characters (incl. NUL) never reach the log: it is rendered and exported as CSV
+  const d = detail ? detail.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300) : null;
+  await run(
+    sql`INSERT INTO audit_log(ts, user_id, event, ip, detail, target_id)
+        VALUES (${now()}, ${userId}, ${event}, ${ip}, ${d}, ${targetId ?? null})`,
+  );
 }
 
 export type AuditFilter = {
@@ -28,30 +31,21 @@ export type AuditFilter = {
 
 const like = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
-function where(f: AuditFilter): { sql: string; args: unknown[] } {
-  const parts: string[] = [],
-    args: unknown[] = [];
-  if (f.category && CATEGORIES[f.category]) {
-    const ps = CATEGORIES[f.category].prefixes;
-    parts.push(`(${ps.map(() => "a.event LIKE ? ESCAPE '\\'").join(" OR ")})`);
-    args.push(...ps.map((p) => `${p.replace(/[\\%_]/g, (c) => `\\${c}`)}%`));
+function where(f: AuditFilter): Sql {
+  const parts: Sql[] = [];
+  if (f.category && Object.prototype.hasOwnProperty.call(CATEGORIES, f.category)) {
+    const ps = CATEGORIES[f.category].prefixes.map((p) => `${p.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    parts.push(
+      sql`(${sql.join(
+        ps.map((p) => sql`a.event LIKE ${p}`),
+        sql` OR `,
+      )})`,
+    );
   }
-  if (f.userId) {
-    parts.push("(a.user_id=? OR a.target_id=?)");
-    args.push(f.userId, f.userId);
-  }
-  if (f.from) {
-    parts.push("a.ts>=?");
-    args.push(f.from);
-  }
-  if (f.to) {
-    parts.push("a.ts<?");
-    args.push(f.to);
-  }
-  if (f.before) {
-    parts.push("a.id<?");
-    args.push(f.before);
-  }
+  if (f.userId) parts.push(sql`(a.user_id = ${f.userId} OR a.target_id = ${f.userId})`);
+  if (f.from) parts.push(sql`a.ts >= ${f.from}`);
+  if (f.to) parts.push(sql`a.ts < ${f.to}`);
+  if (f.before) parts.push(sql`a.id < ${f.before}`);
   const q = f.q?.trim();
   if (q) {
     const id = /^#?(\d{1,12})$/.exec(q);
@@ -60,53 +54,39 @@ function where(f: AuditFilter): { sql: string; args: unknown[] } {
     const labelHits = Object.entries(EVENT_LABELS)
       .filter(([, l]) => l.toLowerCase().includes(needle) || translate("de", l).toLowerCase().includes(needle))
       .map(([k]) => k);
-    const ors = [
-      "a.event LIKE ? ESCAPE '\\'",
-      "a.detail LIKE ? ESCAPE '\\'",
-      "a.ip LIKE ? ESCAPE '\\'",
-      "u.username LIKE ? ESCAPE '\\'",
-      "t.username LIKE ? ESCAPE '\\'",
+    const l = like(q);
+    const ors: Sql[] = [
+      sql`a.event ILIKE ${l}`,
+      sql`a.detail ILIKE ${l}`,
+      sql`a.ip ILIKE ${l}`,
+      sql`u.username ILIKE ${l}`,
+      sql`t.username ILIKE ${l}`,
     ];
-    const orArgs: unknown[] = Array(5).fill(like(q));
-    if (id) {
-      ors.push("a.id=?");
-      orArgs.push(Number(id[1]));
-    }
-    if (labelHits.length) {
-      ors.push(`a.event IN (${labelHits.map(() => "?").join(",")})`);
-      orArgs.push(...labelHits);
-    }
-    parts.push(`(${ors.join(" OR ")})`);
-    args.push(...orArgs);
+    if (id) ors.push(sql`a.id = ${Number(id[1])}`);
+    if (labelHits.length) ors.push(sql`a.event = ANY(${labelHits})`);
+    parts.push(sql`(${sql.join(ors, sql` OR `)})`);
   }
-  return { sql: parts.length ? `WHERE ${parts.join(" AND ")}` : "", args };
+  return parts.length ? sql`WHERE ${sql.join(parts, sql` AND `)}` : sql``;
 }
 
-const BASE = `SELECT a.id, a.ts, a.event, a.ip, a.detail, a.user_id, u.username, a.target_id, t.username AS target_name
-  FROM audit_log a LEFT JOIN users u ON u.id=a.user_id LEFT JOIN users t ON t.id=a.target_id`;
+const BASE = sql`SELECT a.id, a.ts, a.event, a.ip, a.detail, a.user_id, u.username, a.target_id, t.username AS target_name
+  FROM audit_log a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN users t ON t.id = a.target_id`;
 
-export function queryAudit(f: AuditFilter): { rows: AuditRow[]; total: number } {
-  const w = where(f);
+export async function queryAudit(f: AuditFilter): Promise<{ rows: AuditRow[]; total: number }> {
   const limit = Math.min(Math.max(f.limit ?? 50, 1), 200);
-  const rows = db()
-    .prepare(`${BASE} ${w.sql} ORDER BY a.id DESC LIMIT ?`)
-    .all(...w.args, limit) as AuditRow[];
-  const totalW = where({ ...f, before: undefined });
-  const total = (
-    db()
-      .prepare(
-        `SELECT COUNT(*) n FROM audit_log a LEFT JOIN users u ON u.id=a.user_id LEFT JOIN users t ON t.id=a.target_id ${totalW.sql}`,
+  const rows = await all<AuditRow>(sql`${BASE} ${where(f)} ORDER BY a.id DESC LIMIT ${limit}`);
+  const total =
+    (
+      await one<{ n: number }>(
+        sql`SELECT COUNT(*) AS n FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+            LEFT JOIN users t ON t.id = a.target_id ${where({ ...f, before: undefined })}`,
       )
-      .get(...totalW.args) as { n: number }
-  ).n;
+    )?.n ?? 0;
   return { rows, total };
 }
 
-export function exportAudit(f: AuditFilter, max = 100_000): AuditRow[] {
-  const w = where({ ...f, before: undefined });
-  return db()
-    .prepare(`${BASE} ${w.sql} ORDER BY a.id DESC LIMIT ?`)
-    .all(...w.args, max) as AuditRow[];
+export async function exportAudit(f: AuditFilter, max = 100_000): Promise<AuditRow[]> {
+  return all<AuditRow>(sql`${BASE} ${where({ ...f, before: undefined })} ORDER BY a.id DESC LIMIT ${max}`);
 }
 
 /** RFC 4180 CSV with spreadsheet formula injection neutralised (cells starting with = + - @ tab CR). */

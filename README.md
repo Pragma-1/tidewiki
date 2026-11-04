@@ -6,7 +6,7 @@
 
 <p align="center">
   A self-hosted Markdown wiki that stays out of your way — live pages, real search, two-factor sign-in<br>
-  and GDPR tooling, shipped as a single Docker container with a SQLite file.
+  and GDPR tooling. Two containers — the wiki and its PostgreSQL database — and encrypted backups.
 </p>
 
 <p align="center">
@@ -47,7 +47,8 @@
 - Tables, task lists, footnotes, callouts, collapsible blocks, syntax highlighting with a copy button, `[[wiki links]]`, backlinks, previous/next navigation, table of contents, print layout, light and dark theme.
 - Images and videos by upload, paste or drag & drop. YouTube and Vimeo load only after a click (two-click privacy). Every video has **picture-in-picture**.
 - Links to other sites open in a new tab (`rel="noopener"`), internal links stay put.
-- Version history with a line diff, restore, and a "recent changes" feed.
+- Version history with a line diff, restore of any version, edit summaries, and a "recent changes" feed.
+- A trash: deleted pages keep their whole history for 30 days.
 - Import and export: single pages as `.md`, the whole wiki as a ZIP (pages, chapters as folders, media), new pages straight from a `.md` file.
 
 **Search**
@@ -66,7 +67,8 @@
 
 **Operations**
 
-- One container, one volume, one `.env`. Runs as an unprivileged user (`PUID`/`PGID`).
+- Wiki plus PostgreSQL 17 in its own container, on an internal network, with a dedicated database user that has no superuser rights. One `.env`. The wiki runs as an unprivileged user (`PUID`/`PGID`).
+- **Encrypted backups** (AES-256-GCM) on a local disk, an NFS or SMB share, or any S3-compatible storage — scheduled or on demand. Restore a single page, a single account, or everything.
 - SMTP from `.env` or from the settings page, with a test-mail button and HTML mails in the wiki's design.
 - Generated privacy notice, terms of use and imprint (German _Impressum_), filled from your settings.
 
@@ -81,7 +83,7 @@ You need Docker with the Compose plugin.
    curl -fsSL -o .env https://raw.githubusercontent.com/Pragma-1/tidewiki/main/.env.example
    ```
 
-2. Edit `.env` — at least `WIKI_BASE_URL` if the wiki is reached under a domain.
+2. Edit `.env` — set `DB_PASSWORD` and `DB_ADMIN_PASSWORD` (`openssl rand -base64 32` each), and `WIKI_BASE_URL` if the wiki is reached under a domain.
 3. Start it and read the one-time setup token from the log:
 
 ```bash
@@ -91,20 +93,53 @@ docker logs tidewiki
 
 Open `http://<host>:3000/setup`, enter the token and create the owner account. That's it.
 
+Needs **Docker Compose 2.23 or newer** (the database init script is inline under `configs`). The first start of the database creates the wiki's own user from `DB_USER` / `DB_PASSWORD`; changing those later has no effect on an existing database folder.
+
 <details>
-<summary><code>docker.yaml</code></summary>
+<summary><code>docker.yaml</code> (shortened — the real file also has the database init script and NAS examples)</summary>
 
 ```yaml
 services:
+  db:
+    image: postgres:17-alpine
+    container_name: tidewiki-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tidewiki}
+      POSTGRES_USER: ${DB_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?Set DB_ADMIN_PASSWORD in .env}
+      APP_DB_USER: ${DB_USER:-tidewiki}
+      APP_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    configs:
+      - source: db-init
+        target: /docker-entrypoint-initdb.d/10-tidewiki.sh
+    volumes:
+      - ${DB_DATA:-./db}:/var/lib/postgresql/data
+    networks: [backend]
+
   wiki:
     image: astaldoo/tidewiki:latest
     container_name: tidewiki
     restart: unless-stopped
     env_file: .env
+    environment:
+      WIKI_DB_HOST: db
+      WIKI_DB_NAME: ${DB_NAME:-tidewiki}
+      WIKI_DB_USER: ${DB_USER:-tidewiki}
+      WIKI_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      WIKI_BACKUP_DIR: /backups
+    depends_on:
+      db: { condition: service_healthy }
     ports:
       - "${WIKI_PORT:-3000}:3000"
     volumes:
       - ${WIKI_DATA:-./data}:/data
+      - ${WIKI_BACKUPS:-./backups}:/backups
+    networks: [backend, frontend]
+
+networks:
+  backend: { internal: true } # the database is never reachable from outside
+  frontend: {}
 ```
 
 </details>
@@ -113,30 +148,40 @@ Works the same in Portainer, Arcane and similar UIs: create a stack from `docker
 
 **Behind a reverse proxy** (Caddy, Traefik, nginx): set `WIKI_BASE_URL=https://wiki.example.org` and `WIKI_TRUSTED_PROXY_HOPS=1`. HTTPS switches on secure cookies and HSTS automatically.
 
-**Backups:** stop the container or use `sqlite3 data/wiki.db ".backup backup.db"`, and keep a copy of the master key (see below) somewhere else.
+**Backups** are built in (_Einstellungen → Sicherungen_, see [Administration](#administration)). Keep a copy of the master key somewhere else — without it no backup can be read.
+
+**Upgrading from 1.x** (single container with SQLite): replace `docker.yaml`, add the `DB_*` values to `.env` and start. On its first start against an empty database the wiki imports `data/wiki.db` once and renames it to `wiki.db.imported-<date>` — keep that file until you've checked everything is there.
 
 ## Configuration
 
 Everything lives in `.env` ([`.env.example`](.env.example) explains each value). All of it is optional unless noted.
 
-| Variable                                                                             | Default                 | Purpose                                                                                                          |
-| ------------------------------------------------------------------------------------ | ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `PUID` / `PGID`                                                                      | `1000`                  | User and group the wiki runs as; the data folder is handed to them on start. `0` is refused.                     |
-| `WIKI_PORT`                                                                          | `3000`                  | Host port.                                                                                                       |
-| `WIKI_DATA`                                                                          | `./data`                | Host folder or named volume for the database, uploads and the generated master key.                              |
-| `WIKI_BASE_URL`                                                                      | `http://localhost:3000` | The exact address users type. Used for links in mails, cookies and the CSRF check.                               |
-| `WIKI_ALLOWED_HOSTS`                                                                 | —                       | Extra host names (comma separated). Protects against DNS rebinding.                                              |
-| `WIKI_TRUSTED_PROXY_HOPS`                                                            | `0`                     | Number of reverse proxies in front; only then are client IPs trusted.                                            |
-| `WIKI_TIMEZONE`                                                                      | `UTC`                   | Time zone for dates in the interface and mails.                                                                  |
-| `WIKI_MASTER_KEY`                                                                    | generated               | Encrypts 2FA secrets and the SMTP password, peppers password hashes. `openssl rand -base64 48`. **Keep a copy.** |
-| `WIKI_SETUP_TOKEN`                                                                   | random                  | Your own one-time setup token (≥ 16 characters).                                                                 |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | —                       | Mail server. Can also be set in _Einstellungen → E-Mail_, which takes precedence.                                |
-| `WIKI_MASTER_KEY_FILE`, `SMTP_PASSWORD_FILE`                                         | —                       | Read the master key / SMTP password from a file instead (Docker secrets).                                        |
-| `WIKI_MAX_VIDEO_MB`                                                                  | `200`                   | Largest video upload. Images are capped at 15 MB.                                                                |
-| `WIKI_MEDIA_QUOTA_MB`                                                                | `10240`                 | Total space for uploads.                                                                                         |
-| `WIKI_MAX_IMPORT_MB`                                                                 | `1024`                  | Largest import file.                                                                                             |
+| Variable                                                                             | Default                  | Purpose                                                                                                           |
+| ------------------------------------------------------------------------------------ | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `PUID` / `PGID`                                                                      | `1000`                   | User and group the wiki runs as; the data folder is handed to them on start. `0` is refused.                      |
+| `WIKI_PORT`                                                                          | `3000`                   | Host port.                                                                                                        |
+| `WIKI_DATA`                                                                          | `./data`                 | Host folder or named volume for uploads and the generated master key.                                             |
+| `WIKI_BACKUPS`                                                                       | `./backups`              | Host folder or volume for backups (mounted at `/backups`). Another disk or an NFS/SMB volume — see `docker.yaml`. |
+| `DB_NAME`, `DB_USER`                                                                 | `tidewiki`               | Database name and the wiki's own database user (no superuser rights).                                             |
+| `DB_PASSWORD`                                                                        | — **required**           | Password of that user.                                                                                            |
+| `DB_ADMIN_USER`, `DB_ADMIN_PASSWORD`                                                 | `postgres`, **required** | The database superuser. Only the database container gets it; must differ from `DB_USER`.                          |
+| `DB_DATA`                                                                            | `./db`                   | Host folder for the database files. A local disk, not an SMB share.                                               |
+| `WIKI_DB_HOST` … `WIKI_DB_PASSWORD`, `WIKI_DATABASE_URL`, `WIKI_DB_PASSWORD_FILE`    | set by `docker.yaml`     | Only for an existing PostgreSQL server instead of the container.                                                  |
+| `WIKI_DB_SSL`                                                                        | `off`                    | `require` (encrypted) or `verify` (encrypted, certificate checked) for an external server.                        |
+| `WIKI_BASE_URL`                                                                      | `http://localhost:3000`  | The exact address users type. Used for links in mails, cookies and the CSRF check.                                |
+| `WIKI_ALLOWED_HOSTS`                                                                 | —                        | Extra host names (comma separated). Protects against DNS rebinding.                                               |
+| `WIKI_TRUSTED_PROXY_HOPS`                                                            | `0`                      | Number of reverse proxies in front; only then are client IPs trusted.                                             |
+| `WIKI_TIMEZONE`                                                                      | `UTC`                    | Time zone for dates in the interface and mails.                                                                   |
+| `WIKI_MASTER_KEY`                                                                    | generated                | Encrypts 2FA secrets and the SMTP password, peppers password hashes. `openssl rand -base64 48`. **Keep a copy.**  |
+| `WIKI_SETUP_TOKEN`                                                                   | random                   | Your own one-time setup token (≥ 16 characters).                                                                  |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | —                        | Mail server. Can also be set in _Einstellungen → E-Mail_, which takes precedence.                                 |
+| `WIKI_MASTER_KEY_FILE`, `SMTP_PASSWORD_FILE`                                         | —                        | Read the master key / SMTP password from a file instead (Docker secrets).                                         |
+| `WIKI_MAX_VIDEO_MB`                                                                  | `200`                    | Largest video upload. Images are capped at 15 MB.                                                                 |
+| `WIKI_MEDIA_QUOTA_MB`                                                                | `10240`                  | Total space for uploads.                                                                                          |
+| `WIKI_MAX_IMPORT_MB`                                                                 | `1024`                   | Largest import file.                                                                                              |
+| `WIKI_MAX_BACKUP_UPLOAD_MB`                                                          | `20480`                  | Largest backup ZIP that can be uploaded.                                                                          |
 
-Everything else — registration, roles, two-factor requirements, password policy, retention periods, operator details for the legal pages — is configured in the wiki under **Einstellungen**.
+S3 storage for backups is set up in the wiki (_Einstellungen → Sicherungen_), not in `.env`. Everything else — registration, roles, two-factor requirements, password policy, retention periods, operator details for the legal pages — is configured in the wiki under **Einstellungen**.
 
 ## Screenshots
 
@@ -170,6 +215,24 @@ Everything else — registration, roles, two-factor requirements, password polic
   docker exec tidewiki node tidewiki-cli.cjs unlock --all
   ```
 
+- **Trash.** Deleted pages go to _Papierkorb_ (rail, editors and up) with their whole history for 30 days, then they are removed for good. Editors restore; only administrators delete for good or empty it.
+- **Versions.** Every save is a version, optionally with a one-line summary. In _Verlauf_ each version can be viewed, compared with the current one, downloaded as `.md` and restored — a restore adds the old text as a new version on top, so nothing is ever overwritten.
+- **Backups.** _Einstellungen → Sicherungen_: automatic backups (default daily, the newest 14 kept), _Jetzt sichern_, and a safety copy before every full restore and import (the newest 5 kept). A backup holds every page with its whole history, the trash, accounts (with password hashes and 2FA devices), settings, legal texts, the security log and every upload. Sessions and reset links are never in it.
+  - **Where:** a folder (default; the `WIKI_BACKUPS` mount — a local disk, or an NFS/SMB share as a Docker volume, examples in `docker.yaml`) or any **S3-compatible storage** (AWS, MinIO, Wasabi, Backblaze B2, Hetzner, Garage …). The owner sets S3 up in the wiki; the target is tested (write, read back, delete) before it is saved. The S3 secret key is stored encrypted with the master key, never shown again, and not part of backups.
+  - **Encrypted:** everything is encrypted and authenticated (AES-256-GCM in 64 KiB chunks, keys derived from the master key) before it leaves the wiki — the folder, NAS or bucket only ever sees ciphertext and random-looking file names. A changed, swapped or truncated file is refused. Uploads are deduplicated across backups.
+  - **Restore what you need:** _Öffnen_ lists the pages and accounts in a backup. A **single page** comes back as a new version on top of the current one, or — if it was deleted — recreated with its whole history and its pictures. A **single account** can be brought back if it was deleted; its pages are linked to it again. Or **everything**, which replaces the whole wiki.
+  - **Who may do what:**
+
+    | Action                                                | Owner | Administrator | Editor / viewer |
+    | ----------------------------------------------------- | :---: | :-----------: | :-------------: |
+    | List, open, check, create a backup                    |   ✓   |       ✓       |        —        |
+    | Restore a single page                                 |   ✓   |       ✓       |        —        |
+    | Restore an editor's or viewer's account               |   ✓   |       ✓       |        —        |
+    | Restore an administrator's account                    |   ✓   |       —       |        —        |
+    | Restore everything (asks for the password)            |   ✓   |       —       |        —        |
+    | Download, upload, delete; storage location (password) |   ✓   |       —       |        —        |
+
+  - **The master key is not part of a backup** and is needed to read one. Keep it separately (a password manager, printed in a safe) — a backup without its key is worthless, and a key next to its backups protects nothing.
 - **Security log.** Every entry has an ID (`EV-000123`) and can be searched by ID, event, user, IP and details, filtered by category, user and date, and exported as CSV or JSON.
 
 ## Writing pages
@@ -195,25 +258,27 @@ Raw HTML is not rendered — everything you see comes from Markdown.
 - The privacy notice is generated from the real configuration. It is a starting point, not legal advice.
 - Terms of use and imprint can be switched off for a private wiki; the privacy notice always stays. When the wiki is served through Cloudflare (tunnel or proxy), the notice adds a section on what Cloudflare processes — detected automatically from the `CF-Ray` header.
 
-Deleted data is overwritten inside the database file (`secure_delete` plus a WAL checkpoint). Your backups still contain it until they rotate out.
+After an account is erased or a page is deleted for good, the affected tables are vacuumed so the freed space is reused. Data deleted before a backup isn't in it; data deleted afterwards stays in older backups until they rotate out — the privacy notice says so, with the configured schedule. **An account its owner erased themselves is never restored** from a backup, neither singly nor by a full restore (it is erased again right after); only the fact of the erasure is kept for that.
 
 ## Security
 
-Passwords are hashed with Argon2id (64 MiB, t = 3) after an HMAC pepper. TOTP secrets and the SMTP password are encrypted with AES-256-GCM. Sessions store only a hash of a 256-bit token. Every write is checked against the request origin. A strict nonce-based Content Security Policy is in place. Raw HTML is disabled before the sanitizer runs. Rate limits and CPU budgets cover every expensive endpoint.
+Passwords are hashed with Argon2id (64 MiB, t = 3) after an HMAC pepper. TOTP secrets, the SMTP password, the S3 secret and all backups are encrypted with AES-256-GCM. Every database query passes values as bound parameters (a tagged template that can't take anything else; a test fails on any raw query), and the wiki connects as a database user that can't read files, run programs or create roles. Sessions store only a hash of a 256-bit token. Every write is checked against the request origin. A strict nonce-based Content Security Policy is in place. Raw HTML is disabled before the sanitizer runs. Rate limits and CPU budgets cover every expensive endpoint.
 
 See [SECURITY.md](SECURITY.md) for the full design and **how to report a vulnerability**.
 
 ## Development
 
-Requirements: Node.js 22 and npm.
+Requirements: Node.js 22, npm and PostgreSQL 15 or newer. The tests start their own throw-away PostgreSQL from the installed binaries (`/usr/lib/postgresql/<n>/bin`, `pg_config`, or set `PG_BIN`) — no running server needed.
 
 ```bash
 npm ci
-WIKI_DATA_DIR=./data npm run dev   # http://localhost:3000, database in ./data
+docker run -d --name tw-dev-db -p 127.0.0.1:5432:5432 -e POSTGRES_DB=tidewiki \
+  -e POSTGRES_USER=tidewiki -e POSTGRES_PASSWORD=dev postgres:17-alpine
+WIKI_DATA_DIR=./data WIKI_DB_HOST=127.0.0.1 WIKI_DB_PASSWORD=dev npm run dev   # http://localhost:3000
 
-npm run check          # typecheck + formatting + unit tests
+npm run check          # typecheck + lint + formatting + unit tests
 npm run build          # production build (standalone output, assets copied)
-npm run test:e2e       # 200+ end-to-end checks against the production server
+npm run test:e2e       # 300+ end-to-end checks against the production server
 node tests/attack.mjs https://your-host   # fire the adversarial battery at a running instance
 npm run format         # Prettier
 ```
@@ -244,7 +309,7 @@ docker.yaml       Compose file for users
 Dockerfile        multi-stage image, non-root runtime
 ```
 
-**Stack:** Next.js 16, React 19, TypeScript, SQLite via better-sqlite3 (FTS5 trigram index for search), markdown-it + sanitize-html, @node-rs/argon2, nodemailer, Tailwind CSS 4, Inter and JetBrains Mono (self-hosted).
+**Stack:** Next.js 16, React 19, TypeScript, PostgreSQL 17 via node-postgres (pg_trgm for search; better-sqlite3 only for the one-time import of 1.x data), markdown-it + sanitize-html, @node-rs/argon2, nodemailer, Tailwind CSS 4, Inter and JetBrains Mono (self-hosted).
 
 ## License
 

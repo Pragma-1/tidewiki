@@ -905,4 +905,271 @@ export const DE: Record<string, string> = {
     "Nur für das Impressum nötig: eine vollständige, postalisch erreichbare Anschrift (ein Postfach genügt nicht). Ohne Impressum reichen für die Datenschutzerklärung Name und E-Mail.",
   "Fill in name and e-mail of the operator — until then the privacy notice shows placeholders.":
     "Tragen Sie Name und E-Mail des Betreibers ein – bis dahin zeigt die Datenschutzerklärung Platzhalter.",
+  // trash, versions, backups
+  "A downloaded backup contains personal data and password hashes. Store it like a password. Older backups of other versions are migrated automatically when restored.":
+    "Eine heruntergeladene Sicherung enthält personenbezogene Daten und Passwort-Hashes. Bewahren Sie sie auf wie ein Passwort. Sicherungen älterer Versionen werden beim Wiederherstellen automatisch aktualisiert.",
+  "A file in this backup clashes with a file of an existing backup. Refused.":
+    "Eine Datei in dieser Sicherung kollidiert mit einer Datei einer vorhandenen Sicherung. Abgelehnt.",
+  "A full backup (all pages with history, trash, accounts, settings, files) at a fixed interval.":
+    "Eine vollständige Sicherung (alle Seiten mit Verlauf, Papierkorb, Konten, Einstellungen, Dateien) in festem Abstand.",
+  "All pages in the trash and their histories are deleted for good. Backups made before keep them until they expire.":
+    "Alle Seiten im Papierkorb werden samt Verlauf endgültig gelöscht. Vorher angelegte Sicherungen enthalten sie noch, bis diese ablaufen.",
+  "Another import or backup is running. Try again in a moment.":
+    "Gerade läuft ein anderer Import oder eine Sicherung. Bitte versuchen Sie es gleich noch einmal.",
+  "Automatic backups": "Automatische Sicherungen",
+  "Back to the trash": "Zurück zum Papierkorb",
+  "Back up automatically": "Automatisch sichern",
+  "Back up now": "Jetzt sichern",
+  "Backing up…": "Wird gesichert …",
+  "Backup created": "Sicherung erstellt",
+  "Backup created.": "Sicherung erstellt.",
+  "Backup deleted": "Sicherung gelöscht",
+  "Backup downloaded": "Sicherung heruntergeladen",
+  "Backup not found.": "Sicherung nicht gefunden.",
+  "Backup restored": "Sicherung wiederhergestellt",
+  "Backup uploaded": "Sicherung hochgeladen",
+  "Backup uploaded and checked. Restore it from the list when you’re ready.":
+    "Sicherung hochgeladen und geprüft. Sie können sie jetzt in der Liste wiederherstellen.",
+  Backups: "Sicherungen",
+  "Compare version {n} with the current one": "Version {n} mit der aktuellen vergleichen",
+  "Compare with current": "Mit aktueller vergleichen",
+  Created: "Erstellt",
+  "Delete backup": "Sicherung löschen",
+  "Delete backup from {date}": "Sicherung vom {date} löschen",
+  "Delete backup?": "Sicherung löschen?",
+  "Delete permanently?": "Endgültig löschen?",
+  Deleted: "Gelöscht",
+  "Deleted on {date}. Removed for good after {days} days unless restored.":
+    "Gelöscht am {date}. Wird nach {days} Tagen endgültig entfernt, wenn sie nicht wiederhergestellt wird.",
+  "Deleted pages wait here with their whole history for {days} days, then they are removed for good. Only editors and administrators see the trash.":
+    "Gelöschte Seiten liegen hier mit ihrem ganzen Verlauf {days} Tage lang, danach werden sie endgültig entfernt. Den Papierkorb sehen nur Bearbeiter und Administratoren.",
+  "Deleted.": "Gelöscht.",
+  Download: "Herunterladen",
+  "Download backup from {date}": "Sicherung vom {date} herunterladen",
+  "Download version {n} as Markdown": "Version {n} als Markdown herunterladen",
+  "Empty the trash?": "Papierkorb leeren?",
+  "Empty trash": "Papierkorb leeren",
+  "Every page with its complete version history, the trash, all accounts (password hashes, two-factor devices), settings, legal texts, the security log and every uploaded file. Not included: sign-ins (a restore signs everyone out) and the master key — keep a copy of WIKI_MASTER_KEY or master.key somewhere safe, separately from the backups.":
+    "Jede Seite mit ihrem vollständigen Versionsverlauf, der Papierkorb, alle Konten (Passwort-Hashes, Zwei-Faktor-Geräte), Einstellungen, Rechtstexte, das Sicherheitsprotokoll und jede hochgeladene Datei. Nicht enthalten: Anmeldungen (nach einer Wiederherstellung sind alle abgemeldet) und der Master-Key – bewahren Sie WIKI_MASTER_KEY bzw. master.key getrennt von den Sicherungen sicher auf.",
+  "Everyone is signed out, you too. Sign in with the password that was valid at the time of the backup.":
+    "Alle werden abgemeldet, Sie auch. Melden Sie sich mit dem Passwort an, das zum Zeitpunkt der Sicherung galt.",
+  "Everything since then is lost from the live wiki — but a safety backup of the current state is made first, so you can go back.":
+    "Alles seitdem verschwindet aus dem Wiki – vorher wird aber eine Sicherheitskopie des jetzigen Stands angelegt, sodass Sie zurück können.",
+  "Folder: {dir}": "Ordner: {dir}",
+  "How many automatic backups are kept; older ones are deleted. Manual and uploaded backups stay until you delete them; of the safety copies made before a restore or import, the newest 5 are kept.":
+    "Wie viele automatische Sicherungen aufbewahrt werden; ältere werden gelöscht. Manuelle und hochgeladene Sicherungen bleiben, bis Sie sie löschen; von den Sicherheitskopien vor einer Wiederherstellung oder einem Import bleiben die neuesten 5.",
+  Interval: "Abstand",
+  Keep: "Aufbewahren",
+  "Move page to the trash?": "Seite in den Papierkorb verschieben?",
+  "Move to trash": "In den Papierkorb",
+  "Newest versions": "Neueste Versionen",
+  "No backups yet.": "Noch keine Sicherungen.",
+  "Older version restored": "Ältere Version wiederhergestellt",
+  "Older versions": "Ältere Versionen",
+  "Only administrators can delete pages from the trash before the time is up.":
+    "Vor Ablauf der Frist können nur Administratoren Seiten aus dem Papierkorb löschen.",
+  "Only the owner can download, upload, restore or delete backups.":
+    "Nur der Eigentümer kann Sicherungen herunterladen, hochladen, wiederherstellen oder löschen.",
+  "Only the owner of the wiki can do this.": "Das kann nur der Eigentümer des Wikis.",
+  "Page deleted permanently": "Seite endgültig gelöscht",
+  "Page moved to the trash": "Seite in den Papierkorb verschoben",
+  "Page restored from the trash": "Seite aus dem Papierkorb wiederhergestellt",
+  "Removed in": "Entfernt in",
+  Restore: "Wiederherstellen",
+  "Restore backup": "Sicherung wiederherstellen",
+  "Restore the backup from {date}?": "Sicherung vom {date} wiederherstellen?",
+  "Restore version {n}": "Version {n} wiederherstellen",
+  "Restore version {n}?": "Version {n} wiederherstellen?",
+  "Restore “{title}”": "„{title}“ wiederherstellen",
+  "Restored from the trash. Another page took the old address meanwhile, so this one is now at /w/{slug}.":
+    "Aus dem Papierkorb wiederhergestellt. Die alte Adresse hat inzwischen eine andere Seite, deshalb liegt diese jetzt unter /w/{slug}.",
+  "Restoring…": "Wird wiederhergestellt …",
+  Summary: "Zusammenfassung",
+  "Summary contains invalid characters.": "Die Zusammenfassung enthält ungültige Zeichen.",
+  "Summary of the change": "Zusammenfassung der Änderung",
+  "The backup contains database objects Tidewiki doesn’t know. Refused.":
+    "Die Sicherung enthält Datenbankobjekte, die Tidewiki nicht kennt. Abgelehnt.",
+  "The backup doesn’t have exactly one active owner. Refused.":
+    "Die Sicherung hat nicht genau einen aktiven Eigentümer. Abgelehnt.",
+  "The backup from {date} is deleted for good.": "Die Sicherung vom {date} wird endgültig gelöscht.",
+  "The backup has no active administrator. Refused.": "Die Sicherung hat keinen aktiven Administrator. Abgelehnt.",
+  "The backup lists a file of a type Tidewiki doesn’t serve. Refused.":
+    "Die Sicherung führt eine Datei eines Typs, den Tidewiki nicht ausliefert. Abgelehnt.",
+  "The backup was restored and everyone was signed out. Sign in with the password from that time.":
+    "Die Sicherung wurde wiederhergestellt und alle wurden abgemeldet. Melden Sie sich mit dem Passwort von damals an.",
+  "The backups are on the same volume as the wiki. If that disk fails, both are gone: set WIKI_BACKUP_DIR to a different disk or a network share, or download a backup now and then.":
+    "Die Sicherungen liegen auf demselben Datenträger wie das Wiki. Fällt er aus, ist beides weg: Setzen Sie WIKI_BACKUP_DIR auf eine andere Platte oder eine Netzwerkfreigabe, oder laden Sie ab und zu eine Sicherung herunter.",
+  "The backup’s database is damaged.": "Die Datenbank der Sicherung ist beschädigt.",
+  "The backup’s database is incomplete.": "Die Datenbank der Sicherung ist unvollständig.",
+  "The trash is empty.": "Der Papierkorb ist leer.",
+  "The whole wiki is replaced: pages, history, trash, accounts, settings, files and the security log.":
+    "Das ganze Wiki wird ersetzt: Seiten, Verlauf, Papierkorb, Konten, Einstellungen, Dateien und Sicherheitsprotokoll.",
+  "This archive can’t be read.": "Dieses Archiv kann nicht gelesen werden.",
+  "This backup is damaged (checksum mismatch). It can’t be restored.":
+    "Diese Sicherung ist beschädigt (Prüfsumme stimmt nicht). Sie kann nicht wiederhergestellt werden.",
+  "This backup was made by a newer Tidewiki version. Update first, then restore.":
+    "Diese Sicherung stammt von einer neueren Tidewiki-Version. Bitte zuerst aktualisieren, dann wiederherstellen.",
+  "This is not a Tidewiki backup (no wiki schema).": "Das ist keine Tidewiki-Sicherung (kein Wiki-Schema).",
+  "This is not a Tidewiki backup (no wiki.db inside).": "Das ist keine Tidewiki-Sicherung (keine wiki.db enthalten).",
+  "This is not a Tidewiki backup (the database can’t be opened).":
+    "Das ist keine Tidewiki-Sicherung (die Datenbank lässt sich nicht öffnen).",
+  "This is not a Tidewiki backup (unexpected file in the archive).":
+    "Das ist keine Tidewiki-Sicherung (unerwartete Datei im Archiv).",
+  "This is not a Tidewiki backup (duplicate file in the archive).":
+    "Das ist keine Tidewiki-Sicherung (doppelte Datei im Archiv).",
+  "Couldn’t store the upload.": "Der Upload konnte nicht gespeichert werden.",
+  "This page is no longer in the trash.": "Diese Seite ist nicht mehr im Papierkorb.",
+  "This version doesn’t exist.": "Diese Version gibt es nicht.",
+  "This version is identical to the current one.": "Diese Version ist mit der aktuellen identisch.",
+  "Time between two automatic backups. 24 = daily, 168 = weekly.":
+    "Zeit zwischen zwei automatischen Sicherungen. 24 = täglich, 168 = wöchentlich.",
+  "Title and text of version {n} become the current version {m}. Nothing is lost: the version you replace stays in the history and can be restored the same way.":
+    "Titel und Text von Version {n} werden zur aktuellen Version {m}. Es geht nichts verloren: Die ersetzte Version bleibt im Verlauf und lässt sich genauso wiederherstellen.",
+  Trash: "Papierkorb",
+  "Trash emptied": "Papierkorb geleert",
+  "Two-factor codes and the SMTP password only work if the master key is still the same as when the backup was made.":
+    "Zwei-Faktor-Codes und das SMTP-Passwort funktionieren nur, wenn der Master-Key noch derselbe ist wie beim Anlegen der Sicherung.",
+  Type: "Art",
+  "Upload backup": "Sicherung hochladen",
+  "View version {n}": "Version {n} ansehen",
+  "What a backup contains": "Was eine Sicherung enthält",
+  "What did you change? (optional)": "Was haben Sie geändert? (optional)",
+  "Your password": "Ihr Passwort",
+  automatic: "automatisch",
+  backups: "Sicherungen",
+  "before a restore": "vor Wiederherstellung",
+  "before an import": "vor Import",
+  current: "aktuell",
+  "data from {date}": "Daten vom {date}",
+  empty: "leeren",
+  "in {chapter}": "in {chapter}",
+  manual: "manuell",
+  "restored from version {n}": "wiederhergestellt aus Version {n}",
+  uploaded: "hochgeladen",
+  "within a day": "innerhalb eines Tages",
+  "{n} backups, {size} on disk. Files that several backups share are stored once.":
+    "{n} Sicherungen, {size} belegt. Dateien, die mehrere Sicherungen teilen, liegen nur einmal vor.",
+  "{n} days": "{n} Tage",
+  "{n} files are missing from the backup folder.": "{n} Dateien fehlen im Sicherungsordner.",
+  "{n} files were missing from the backup folder.": "{n} Dateien fehlten im Sicherungsordner.",
+  "trash {n}": "Papierkorb {n}",
+  "{n} pages": "{n} Seiten",
+  "{n} versions": "{n} Versionen",
+  "{n} versions. Every save is kept; restoring an older version adds it as a new version on top, so nothing is ever overwritten.":
+    "{n} Versionen. Jedes Speichern bleibt erhalten; eine ältere Version wiederherzustellen legt sie als neue Version obendrauf, es wird also nie etwas überschrieben.",
+  "Pages {p} · versions {r} · accounts {u} · files {m}": "Seiten {p} · Versionen {r} · Konten {u} · Dateien {m}",
+  "“{title}” and its whole history are deleted for good. Backups made before keep it until they expire.":
+    "„{title}“ wird samt Verlauf endgültig gelöscht. Vorher angelegte Sicherungen enthalten die Seite noch, bis diese ablaufen.",
+  "“{title}” and its whole history go to the trash, where editors can restore it for 30 days. Pages inside it move to the top level until then.":
+    "„{title}“ kommt samt Verlauf in den Papierkorb und kann dort 30 Tage lang wiederhergestellt werden. Unterseiten wandern so lange auf die oberste Ebene.",
+  // PostgreSQL, encrypted backups, single restores
+  "Access key": "Zugriffsschlüssel",
+  "Account restored.": "Konto wiederhergestellt.",
+  Accounts: "Konten",
+  "Backup checked: every entry and every file is complete and unchanged.":
+    "Sicherung geprüft: Jeder Eintrag und jede Datei ist vollständig und unverändert.",
+  "Backup from {date}": "Sicherung vom {date}",
+  "Backups are encrypted (AES-256-GCM) with a key derived from the master key before they leave the database: the storage only ever sees ciphertext. Without WIKI_MASTER_KEY or master.key, no backup can be read — keep a copy of it somewhere safe, separately from the backups.":
+    "Sicherungen werden verschlüsselt (AES-256-GCM), bevor sie die Datenbank verlassen – mit einem Schlüssel, der aus dem Master-Key abgeleitet wird. Der Speicher sieht nur verschlüsselte Daten. Ohne WIKI_MASTER_KEY bzw. master.key lässt sich keine Sicherung lesen – bewahren Sie eine Kopie sicher auf, getrennt von den Sicherungen.",
+  Bucket: "Bucket",
+  "Change the backup storage in the backup settings.":
+    "Den Speicherort für Sicherungen ändern Sie in den Sicherungs-Einstellungen.",
+  "Check backup": "Sicherung prüfen",
+  "Check backup from {date}": "Sicherung vom {date} prüfen",
+  "Choose where backups should go.": "Wählen Sie, wohin die Sicherungen gehen sollen.",
+  "Currently: {where}": "Aktuell: {where}",
+  Endpoint: "Endpunkt",
+  "Enter the S3 endpoint as a full URL (https://…).":
+    "Geben Sie den S3-Endpunkt als vollständige Adresse an (https://…).",
+  "Every page with its complete version history, the trash, all accounts (password hashes, two-factor devices), settings, legal texts, the security log and every uploaded file. Not included: sign-ins (a restore signs everyone out).":
+    "Jede Seite mit ihrem vollständigen Versionsverlauf, der Papierkorb, alle Konten (Passwort-Hashes, Zwei-Faktor-Geräte), Einstellungen, Rechtstexte, das Sicherheitsprotokoll und jede hochgeladene Datei. Nicht enthalten: Anmeldungen (nach einer Wiederherstellung sind alle abgemeldet).",
+  Filter: "Filtern",
+  Folder: "Ordner",
+  "Folder (local disk, NAS via SMB or NFS)": "Ordner (lokale Platte, NAS per SMB oder NFS)",
+  "Folder in the bucket": "Ordner im Bucket",
+  "Folder in the container: {dir}. Which disk or share that is, is set in docker.yaml (WIKI_BACKUPS).":
+    "Ordner im Container: {dir}. Welche Platte oder Freigabe das ist, legt docker.yaml fest (WIKI_BACKUPS).",
+  "Folder: letters, digits, dot, dash, underscore, ending with “/”.":
+    "Ordner: Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich, endet mit „/“.",
+  "Invalid access key.": "Ungültiger Zugriffsschlüssel.",
+  "Invalid bucket name.": "Ungültiger Bucket-Name.",
+  "Invalid number.": "Ungültige Zahl.",
+  "Invalid region.": "Ungültige Region.",
+  "Nothing found.": "Nichts gefunden.",
+  "Only deleted accounts can be restored.": "Nur gelöschte Konten lassen sich wiederherstellen.",
+  "Only the owner can change where backups are stored.":
+    "Nur der Eigentümer kann ändern, wo Sicherungen gespeichert werden.",
+  "Only the owner can restore administrators.": "Nur der Eigentümer kann Administratoren wiederherstellen.",
+  "Page restored.": "Seite wiederhergestellt.",
+  "Path-style addresses (MinIO, Garage, most self-hosted servers)":
+    "Pfad-Adressierung (MinIO, Garage, die meisten selbst betriebenen Server)",
+  Region: "Region",
+  "Restore account": "Konto wiederherstellen",
+  "Restore everything": "Alles wiederherstellen",
+  "Restore everything from {date}": "Alles vom {date} wiederherstellen",
+  "Restore page": "Seite wiederherstellen",
+  "Restore single pages or accounts": "Einzelne Seiten oder Konten wiederherstellen",
+  "Restore the account “{name}”?": "Konto „{name}“ wiederherstellen?",
+  "Restore “{title}”?": "„{title}“ wiederherstellen?",
+  "Restored as a new version.": "Als neue Version wiederhergestellt.",
+  "S3-compatible storage": "S3-kompatibler Speicher",
+  "Secret key": "Geheimer Schlüssel",
+  "Storage tested and saved.": "Speicher getestet und gespeichert.",
+  "Test and save": "Testen und speichern",
+  "Test connection": "Verbindung testen",
+  "Testing…": "Wird getestet …",
+  "Text contains invalid characters.": "Der Text enthält ungültige Zeichen.",
+  "The S3 endpoint is only scheme, host and port — no path or credentials.":
+    "Der S3-Endpunkt besteht nur aus Schema, Host und Port – ohne Pfad und ohne Zugangsdaten.",
+  "The S3 endpoint’s host name could not be resolved.": "Der Hostname des S3-Endpunkts lässt sich nicht auflösen.",
+  "The S3 secret key is missing.": "Der geheime S3-Schlüssel fehlt.",
+  "The account comes back with its role, password and authenticator devices from the backup, and is linked to its pages again. The person signs in with the password they had then.":
+    "Das Konto kommt mit Rolle, Passwort und Authenticator-Geräten aus der Sicherung zurück und wird wieder mit seinen Seiten verknüpft. Die Person meldet sich mit dem damaligen Passwort an.",
+  "The backup is incomplete: {n} files are missing or damaged.":
+    "Die Sicherung ist unvollständig: {n} Dateien fehlen oder sind beschädigt.",
+  "The backup storage can’t be read right now.": "Der Sicherungsspeicher kann gerade nicht gelesen werden.",
+  "The backup storage returned different data.": "Der Sicherungsspeicher hat andere Daten zurückgegeben.",
+  "The backup storage works ({where}).": "Der Sicherungsspeicher funktioniert ({where}).",
+  "The backups are on the same volume as the wiki. If that disk fails, both are gone: point WIKI_BACKUPS at another disk or a NAS share, or use S3.":
+    "Die Sicherungen liegen auf demselben Datenträger wie das Wiki. Fällt er aus, ist beides weg: Richten Sie WIKI_BACKUPS auf eine andere Platte oder eine NAS-Freigabe, oder nutzen Sie S3.",
+  "The database is not reachable right now.": "Die Datenbank ist gerade nicht erreichbar.",
+  "The page is identical to the version in the backup.": "Die Seite ist identisch mit der Fassung in der Sicherung.",
+  "The page no longer exists. It is recreated with its whole history from the backup.":
+    "Die Seite existiert nicht mehr. Sie wird mit ihrem ganzen Verlauf aus der Sicherung neu angelegt.",
+  "The page still exists. Its title and text from the backup become a new version on top — the current version stays in the history.":
+    "Die Seite existiert noch. Titel und Text aus der Sicherung werden zu einer neuen Version obendrauf – die aktuelle bleibt im Verlauf.",
+  "The request contains invalid values.": "Die Anfrage enthält ungültige Werte.",
+  "The server is busy. Try again in a moment.":
+    "Der Server ist gerade ausgelastet. Bitte gleich noch einmal versuchen.",
+  "This S3 endpoint address is not allowed.": "Diese Adresse ist als S3-Endpunkt nicht erlaubt.",
+  "This account isn’t in the backup.": "Dieses Konto ist nicht in der Sicherung.",
+  "This account still exists. Only deleted accounts can be restored.":
+    "Dieses Konto existiert noch. Nur gelöschte Konten lassen sich wiederherstellen.",
+  "This already exists.": "Das gibt es bereits.",
+  "This backup can’t be read with this wiki’s master key, or it is damaged.":
+    "Diese Sicherung lässt sich mit dem Master-Key dieses Wikis nicht lesen, oder sie ist beschädigt.",
+  "This backup is already in the list.": "Diese Sicherung ist bereits in der Liste.",
+  "This backup is damaged.": "Diese Sicherung ist beschädigt.",
+  "This is not a Tidewiki backup.": "Das ist keine Tidewiki-Sicherung.",
+  "This page isn’t in the backup.": "Diese Seite ist nicht in der Sicherung.",
+  "Where backups are stored": "Speicherort der Sicherungen",
+  "Where backups are stored stays as it is now.": "Der Speicherort der Sicherungen bleibt, wie er jetzt ist.",
+  deleted: "gelöscht",
+  exists: "vorhanden",
+  unchanged: "unverändert",
+  "{n} backups in the storage can’t be read with this wiki’s master key (or are damaged). They are left untouched.":
+    "{n} Sicherungen im Speicher lassen sich mit dem Master-Key dieses Wikis nicht lesen (oder sind beschädigt). Sie bleiben unangetastet.",
+  "“Open” restores single pages or accounts. Restoring everything replaces the whole wiki.":
+    "„Öffnen“ stellt einzelne Seiten oder Konten wieder her. „Alles wiederherstellen“ ersetzt das ganze Wiki.",
+  "“Open” restores single pages, and accounts of editors and viewers. Only the owner can restore everything, download, upload or delete backups.":
+    "„Öffnen“ stellt einzelne Seiten sowie Konten von Bearbeitern und Lesern wieder her. Nur der Eigentümer kann alles wiederherstellen und Sicherungen herunterladen, hochladen oder löschen.",
+  "The backup storage can’t be reached.": "Der Sicherungsspeicher ist nicht erreichbar.",
+  "The backup storage refused access. Check the keys and the bucket’s permissions.":
+    "Der Sicherungsspeicher verweigert den Zugriff. Prüfen Sie die Schlüssel und die Rechte am Bucket.",
+  "The backup storage refused the request. Check endpoint, region and bucket.":
+    "Der Sicherungsspeicher lehnt die Anfrage ab. Prüfen Sie Endpunkt, Region und Bucket.",
+  "Backup page restored": "Seite aus Sicherung wiederhergestellt",
+  "Backup account restored": "Konto aus Sicherung wiederhergestellt",
+  "This person deleted their account themselves (right to erasure). It can't be restored.":
+    "Diese Person hat ihr Konto selbst gelöscht (Recht auf Löschung). Es kann nicht wiederhergestellt werden.",
 };

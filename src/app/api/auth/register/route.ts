@@ -13,8 +13,12 @@ export const POST = api("public", async ({ body, ip, req }) => {
     str(b.password, "Password", { max: 256, trim: false }),
     ip,
   );
-  const ttl = getSettings().session_hours * 3600;
+  const ttl = (await getSettings()).session_hours * 3600;
   const res = json({ ok: true }, 201);
-  res.cookies.set(SESSION_COOKIE, createSession(id, "full", ttl, ip, req.headers.get("user-agent")), cookieOpts(ttl));
+  res.cookies.set(
+    SESSION_COOKIE,
+    await createSession(id, "full", ttl, ip, req.headers.get("user-agent")),
+    cookieOpts(ttl),
+  );
   return res;
 });

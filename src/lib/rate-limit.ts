@@ -1,53 +1,45 @@
-import { db, now } from "./db";
+import { one, run, sql, now } from "./db";
 
 /**
- * Fixed-window counter persisted in SQLite (survives restarts, works across workers).
- * Returns false once `limit` hits inside the window have been consumed.
+ * Fixed-window counter in the database (survives restarts, works across processes).
+ * Returns false once `limit` hits inside the window have been consumed. One atomic statement:
+ * concurrent requests can't both slip under the limit.
  */
-export function consume(key: string, limit: number, windowSec: number): boolean {
+export async function consume(key: string, limit: number, windowSec: number): Promise<boolean> {
   const t = now();
-  return db()
-    .transaction(() => {
-      const row = db().prepare("SELECT count, reset_at FROM rate_limits WHERE key=?").get(key) as
-        { count: number; reset_at: number } | undefined;
-      if (!row || row.reset_at <= t) {
-        db()
-          .prepare(
-            "INSERT INTO rate_limits(key,count,reset_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count, reset_at=excluded.reset_at",
-          )
-          .run(key, 1, t + windowSec);
-        return true;
-      }
-      if (row.count >= limit) return false;
-      db().prepare("UPDATE rate_limits SET count=count+1 WHERE key=?").run(key);
-      return true;
-    })
-    .immediate();
+  const r = await one<{ count: number }>(
+    sql`INSERT INTO rate_limits(key, count, reset_at) VALUES (${key}, 1, ${t + windowSec})
+        ON CONFLICT (key) DO UPDATE SET
+          count = CASE WHEN rate_limits.reset_at <= ${t} THEN 1 ELSE rate_limits.count + 1 END,
+          reset_at = CASE WHEN rate_limits.reset_at <= ${t} THEN excluded.reset_at ELSE rate_limits.reset_at END
+        RETURNING count`,
+  );
+  return (r?.count ?? 1) <= limit;
 }
 
-export function purgeRateLimits() {
-  db().prepare("DELETE FROM rate_limits WHERE reset_at <= ?").run(now());
+export async function purgeRateLimits() {
+  await run(sql`DELETE FROM rate_limits WHERE reset_at <= ${now()}`);
 }
 
 /** Read-only check: has `key` already reached `limit` inside its current window? */
-export function isBlocked(key: string, limit: number): boolean {
-  const row = db().prepare("SELECT count, reset_at FROM rate_limits WHERE key=?").get(key) as
-    { count: number; reset_at: number } | undefined;
+export async function isBlocked(key: string, limit: number): Promise<boolean> {
+  const row = await one<{ count: number; reset_at: number }>(
+    sql`SELECT count, reset_at FROM rate_limits WHERE key = ${key}`,
+  );
   return !!row && row.reset_at > now() && row.count >= limit;
 }
 
 /** Count one failure; the window starts with the first failure. */
-export function recordFailure(key: string, windowSec: number) {
+export async function recordFailure(key: string, windowSec: number) {
   const t = now();
-  db()
-    .prepare(
-      `INSERT INTO rate_limits(key,count,reset_at) VALUES(?,1,?)
-    ON CONFLICT(key) DO UPDATE SET count = CASE WHEN reset_at <= ? THEN 1 ELSE count+1 END,
-                                   reset_at = CASE WHEN reset_at <= ? THEN excluded.reset_at ELSE reset_at END`,
-    )
-    .run(key, t + windowSec, t, t);
+  await run(
+    sql`INSERT INTO rate_limits(key, count, reset_at) VALUES (${key}, 1, ${t + windowSec})
+        ON CONFLICT (key) DO UPDATE SET
+          count = CASE WHEN rate_limits.reset_at <= ${t} THEN 1 ELSE rate_limits.count + 1 END,
+          reset_at = CASE WHEN rate_limits.reset_at <= ${t} THEN excluded.reset_at ELSE rate_limits.reset_at END`,
+  );
 }
 
-export function clearKey(key: string) {
-  db().prepare("DELETE FROM rate_limits WHERE key=?").run(key);
+export async function clearKey(key: string) {
+  await run(sql`DELETE FROM rate_limits WHERE key = ${key}`);
 }

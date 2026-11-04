@@ -16,7 +16,7 @@ import { open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { Unzip, UnzipInflate, UnzipPassThrough, Zip, ZipDeflate, ZipPassThrough } from "fflate";
-import { db, now } from "./db";
+import { all, one, run, sql, tx, now } from "./db";
 import { LIMITS as APP } from "./config";
 import { getPage, getTree, createPage, updatePage, type TreeNode } from "./pages";
 import { LIMITS as MEDIA, MEDIA_DIR, sniff, stripImage, type MediaRow } from "./media";
@@ -96,21 +96,16 @@ export function exportWikiZip(): ReadableStream<Uint8Array> {
     f.push(new TextEncoder().encode(text), true);
   };
 
-  (async () => {
+  void (async () => {
     try {
-      const paths = exportPaths(getTree());
-      const pages = db().prepare("SELECT id, slug, title, content, updated_at FROM pages").all() as {
-        id: number;
-        slug: string;
-        title: string;
-        content: string;
-        updated_at: number;
-      }[];
+      const paths = exportPaths(await getTree());
+      const pages = await all<{ id: number; slug: string; title: string; content: string; updated_at: number }>(
+        sql`SELECT id, slug, title, content, updated_at FROM pages`,
+      );
       const byId = new Map(pages.map((p) => [p.id, p]));
-      const media = db().prepare("SELECT name, original_name, mime FROM media ORDER BY id").all() as Pick<
-        MediaRow,
-        "name" | "original_name" | "mime"
-      >[];
+      const media = await all<Pick<MediaRow, "name" | "original_name" | "mime">>(
+        sql`SELECT name, original_name, mime FROM media ORDER BY id`,
+      );
       addText(
         "tidewiki.json",
         JSON.stringify(
@@ -187,10 +182,16 @@ export type ImportResult = {
 const IMPORT_DIR = () => path.join(/* turbopackIgnore: true */ MEDIA_DIR(), ".import");
 
 /** Streams the request body into a temp file with a hard cap. */
-export async function receiveUpload(body: ReadableStream<Uint8Array>, declared: number): Promise<string> {
-  if (declared > IMPORT_LIMITS.upload) throw new HttpError(413, "This file is too large.");
-  mkdirSync(IMPORT_DIR(), { recursive: true, mode: 0o700 });
-  const file = path.join(/* turbopackIgnore: true */ IMPORT_DIR(), `upload-${randomBytes(9).toString("hex")}`);
+export async function receiveUpload(
+  body: ReadableStream<Uint8Array>,
+  declared: number,
+  opts: { cap?: number; dir?: string } = {},
+): Promise<string> {
+  const cap = opts.cap ?? IMPORT_LIMITS.upload;
+  const dir = opts.dir ?? IMPORT_DIR();
+  if (declared > cap) throw new HttpError(413, "This file is too large.");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(/* turbopackIgnore: true */ dir, `upload-${randomBytes(9).toString("hex")}`);
   const out = createWriteStream(file, { mode: 0o600 });
   let failed: Error | null = null;
   out.on("error", (e) => {
@@ -203,7 +204,7 @@ export async function receiveUpload(body: ReadableStream<Uint8Array>, declared: 
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > IMPORT_LIMITS.upload) throw new HttpError(413, "This file is too large.");
+      if (size > cap) throw new HttpError(413, "This file is too large.");
       if (failed) throw new HttpError(500, "Something went wrong on the server.");
       if (!out.write(value)) await waitForDrain(out);
     }
@@ -477,8 +478,13 @@ async function plan(
   let mediaReused = 0;
   const stored: string[] = [];
   const claimed = new Set<string>(); // a slug used twice inside the archive must not "conflict" with itself
+  const existingSlugs = new Set(
+    (
+      await all<{ slug: string }>(sql`SELECT slug FROM pages WHERE slug = ANY(${ordered.map((n) => n.slug)}::text[])`)
+    ).map((r) => r.slug),
+  );
   const planItems: PlanItem[] = ordered.map((n) => {
-    const existing = claimed.has(n.slug) ? undefined : getPage(n.slug);
+    const existing = claimed.has(n.slug) ? undefined : existingSlugs.has(n.slug) || undefined;
     claimed.add(n.slug);
     const action: PlanItem["action"] = !existing
       ? "create"
@@ -509,7 +515,7 @@ async function plan(
   try {
     for (const e of mediaEntries) {
       const oldName = e.path.split("/")[1];
-      if (db().prepare("SELECT 1 FROM media WHERE name=?").get(oldName)) {
+      if (await one(sql`SELECT 1 FROM media WHERE name = ${oldName}`)) {
         rename.set(oldName, oldName);
         mediaReused++;
         continue;
@@ -532,9 +538,10 @@ async function plan(
       writeFileSync(`${dest}.part`, data, { mode: 0o600 });
       renameSync(`${dest}.part`, dest);
       stored.push(dest);
-      db()
-        .prepare("INSERT INTO media(name,mime,kind,size,original_name,created_by,created_at) VALUES(?,?,?,?,?,?,?)")
-        .run(name, type.mime, type.kind, data.length, oldName.slice(0, 120), opts.userId, now());
+      await run(
+        sql`INSERT INTO media(name, mime, kind, size, original_name, created_by, created_at)
+            VALUES (${name}, ${type.mime}, ${type.kind}, ${data.length}, ${oldName.slice(0, 120)}, ${opts.userId}, ${now()})`,
+      );
       rename.set(oldName, name);
     }
     result.mediaReused = mediaReused;
@@ -544,18 +551,20 @@ async function plan(
       );
 
     // ---- pages, all-or-nothing
-    db().transaction(() => {
+    await tx(async () => {
       const idByKey = new Map<string, number>();
-      ordered.forEach((n, i) => {
+      result.created = result.updated = 0; // a retried transaction starts counting again
+      for (let i = 0; i < ordered.length; i++) {
+        const n = ordered[i];
         const item = planItems[i];
         const parentId = n.parentKey ? (idByKey.get(n.parentKey) ?? null) : null;
-        const existing = item.action === "create" || item.action === "copy" ? undefined : getPage(n.slug);
+        const existing = item.action === "create" || item.action === "copy" ? undefined : await getPage(n.slug);
         if (item.action === "skip" && existing) {
           idByKey.set(n.key, existing.id);
-          return;
+          continue;
         }
         if (item.action === "overwrite" && existing) {
-          const p = updatePage(existing.slug, {
+          const p = await updatePage(existing.slug, {
             title: n.title,
             content: fix(n.content),
             parentId: parentId === existing.id ? existing.parent_id : parentId,
@@ -564,20 +573,26 @@ async function plan(
           });
           idByKey.set(n.key, p.id);
           result.updated++;
-          return;
+          continue;
         }
-        const p = createPage({ title: n.title, content: fix(n.content), parentId, userId: opts.userId, slug: n.slug });
+        const p = await createPage({
+          title: n.title,
+          content: fix(n.content),
+          parentId,
+          userId: opts.userId,
+          slug: n.slug,
+        });
         item.slug = p.slug;
         idByKey.set(n.key, p.id);
         result.created++;
-      });
-    })();
+      }
+    });
     return result;
   } catch (e) {
     // roll back stored media too, so a failed import leaves nothing behind
     for (const f of stored) {
       rmSync(f, { force: true });
-      db().prepare("DELETE FROM media WHERE name=?").run(path.basename(f));
+      await run(sql`DELETE FROM media WHERE name = ${path.basename(f)}`);
     }
     throw e;
   }

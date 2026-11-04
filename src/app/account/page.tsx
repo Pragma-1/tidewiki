@@ -13,10 +13,10 @@ export async function generateMetadata() {
 
 export default async function Account() {
   const user = (await gate("user", { allowPending2fa: true }))!;
-  const cfg = getSettings();
+  const cfg = await getSettings();
   const t = await getT();
   // Only derived handles leave the server, never the stored session hashes.
-  const sessions = listSessions(user.id).map((s) => ({
+  const sessions = (await listSessions(user.id)).map((s) => ({
     handle: sessionHandle(s.id_hash),
     current: s.id_hash === user.sessionHash,
     created_at: s.created_at,
@@ -40,9 +40,9 @@ export default async function Account() {
         username={user.username}
         email={user.email}
         policy={policyFromSettings(cfg)}
-        devices={listDevices(user.id)}
+        devices={await listDevices(user.id)}
         required={user.mfaRequired}
-        codesLeft={recoveryCodesLeft(user.id)}
+        codesLeft={await recoveryCodesLeft(user.id)}
         isOwner={user.isOwner}
         sessions={sessions}
       />

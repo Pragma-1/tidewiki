@@ -8,7 +8,7 @@ export const POST = api(
   "user",
   async ({ body, user, ip }) => {
     const b = await body();
-    return json({ recoveryCodes: enableTotp(user!, str(b.code, "Code", { max: 10 }), ip, b.name) });
+    return json({ recoveryCodes: await enableTotp(user!, str(b.code, "Code", { max: 10 }), ip, b.name) });
   },
   { allowPending2fa: true },
 );

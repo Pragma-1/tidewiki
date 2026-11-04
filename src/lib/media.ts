@@ -3,7 +3,7 @@ import { waitForDrain } from "./stream-util";
 import { createWriteStream, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DATA_DIR } from "./config";
-import { db, now } from "./db";
+import { all, one, run, sql, now } from "./db";
 import { HttpError } from "./validate";
 
 export const MEDIA_DIR = () => path.join(/* turbopackIgnore: true */ DATA_DIR, "media");
@@ -272,7 +272,7 @@ export function stripImage(b: Buffer, ext: string): Buffer {
 
 /* ------------------------------------------------------------------ store */
 
-const usedBytes = () => (db().prepare("SELECT COALESCE(SUM(size),0) n FROM media").get() as { n: number }).n;
+const usedBytes = async () => (await one<{ n: number }>(sql`SELECT COALESCE(SUM(size), 0) AS n FROM media`))?.n ?? 0;
 const cleanName = (s: string | null) =>
   s
     ? s
@@ -316,7 +316,7 @@ async function storeUploadInner(
   const dir = MEDIA_DIR();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (declared > LIMITS.video) throw new HttpError(413, "This file is too large.");
-  if (usedBytes() + Math.max(declared, 0) > LIMITS.quota)
+  if ((await usedBytes()) + Math.max(declared, 0) > LIMITS.quota)
     throw new HttpError(507, "The media storage is full. Ask an administrator to delete unused files.");
   const tmp = path.join(/* turbopackIgnore: true */ dir, `.upload-${randomBytes(9).toString("hex")}`);
   const out = createWriteStream(tmp, { mode: 0o600 });
@@ -359,12 +359,16 @@ async function storeUploadInner(
       rmSync(tmp, { force: true });
     } else renameSync(tmp, final);
     const stored = statSync(final).size;
-    const id = Number(
-      db()
-        .prepare("INSERT INTO media(name,mime,kind,size,original_name,created_by,created_at) VALUES(?,?,?,?,?,?,?)")
-        .run(name, type.mime, type.kind, stored, cleanName(originalName), userId, now()).lastInsertRowid,
-    );
-    return db().prepare("SELECT * FROM media WHERE id=?").get(id) as MediaRow;
+    try {
+      return (await one<MediaRow>(
+        sql`INSERT INTO media(name, mime, kind, size, original_name, created_by, created_at)
+            VALUES (${name}, ${type.mime}, ${type.kind}, ${stored}, ${cleanName(originalName)}, ${userId}, ${now()})
+            RETURNING *`,
+      ))!;
+    } catch (e) {
+      rmSync(final, { force: true }); // no row, no file
+      throw e;
+    }
   } catch (e) {
     try {
       await reader.cancel();
@@ -377,27 +381,24 @@ async function storeUploadInner(
   }
 }
 
-export const getMediaByName = (name: string) =>
-  db().prepare("SELECT * FROM media WHERE name=?").get(name) as MediaRow | undefined;
+export const getMediaByName = (name: string) => one<MediaRow>(sql`SELECT * FROM media WHERE name = ${name}`);
 
 export function listMedia() {
-  return db()
-    .prepare(
-      `SELECT m.*, u.username,
-      (SELECT COUNT(*) FROM pages p WHERE instr(p.content, m.name) > 0) AS used_in
-    FROM media m LEFT JOIN users u ON u.id=m.created_by ORDER BY m.id DESC`,
-    )
-    .all() as (MediaRow & { username: string | null; used_in: number })[];
+  return all<MediaRow & { username: string | null; used_in: number }>(
+    sql`SELECT m.*, u.username,
+          (SELECT COUNT(*) FROM pages p WHERE strpos(p.content, m.name) > 0) AS used_in
+        FROM media m LEFT JOIN users u ON u.id = m.created_by ORDER BY m.id DESC`,
+  );
 }
 
-export function deleteMedia(id: number, actor: { id: number; role: string }) {
-  const m = db().prepare("SELECT * FROM media WHERE id=?").get(id) as MediaRow | undefined;
+export async function deleteMedia(id: number, actor: { id: number; role: string }) {
+  const m = await one<MediaRow>(sql`SELECT * FROM media WHERE id = ${id}`);
   if (!m) throw new HttpError(404, "File not found.");
   if (actor.role !== "admin" && m.created_by !== actor.id)
     throw new HttpError(403, "Only the uploader or an administrator can delete this file.");
-  db().prepare("DELETE FROM media WHERE id=?").run(id);
+  await run(sql`DELETE FROM media WHERE id = ${id}`);
   rmSync(path.join(/* turbopackIgnore: true */ MEDIA_DIR(), m.name), { force: true });
   return m;
 }
 
-export const mediaUsage = () => ({ used: usedBytes(), quota: LIMITS.quota });
+export const mediaUsage = async () => ({ used: await usedBytes(), quota: LIMITS.quota });

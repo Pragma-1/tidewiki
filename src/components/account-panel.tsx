@@ -490,7 +490,6 @@ function TwoFactor({ devices, required, codesLeft }: { devices: Device[]; requir
               }}
             >
               <p>{t("Scan this QR code with your authenticator app, then enter the 6-digit code it shows.")}</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img className="qr" src={qr} alt={t("QR code for your authenticator app")} width={192} height={192} />
               <p className="hint">{t("Can’t scan? Enter this key manually:")}</p>
               <p className="secret">{secret}</p>

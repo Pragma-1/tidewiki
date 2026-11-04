@@ -7,7 +7,7 @@ export const POST = api("public", async ({ body, ip, t, lang }) => {
   const b = await body();
   const email = str(b.email, "E-mail", { max: 254 });
   // Identical answer whether or not the address exists; sending happens in the background.
-  requestPasswordReset(email, ip, lang).catch((e) =>
+  void requestPasswordReset(email, ip, lang).catch((e: unknown) =>
     console.error("[reset] failed:", e instanceof Error ? e.message : "unknown"),
   );
   return json({

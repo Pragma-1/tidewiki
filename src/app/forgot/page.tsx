@@ -13,7 +13,7 @@ export async function generateMetadata() {
 export default async function Forgot() {
   await gate("none");
   const t = await getT();
-  if (!getSettings().allow_password_reset || !isMailConfigured())
+  if (!(await getSettings()).allow_password_reset || !(await isMailConfigured()))
     return (
       <Shell live={false}>
         <div className="auth card">

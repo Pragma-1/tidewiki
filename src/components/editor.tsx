@@ -71,6 +71,7 @@ export function Editor({ mode, slug, initial, parents, importMode = false }: Pro
   const [title, setTitle] = useState(initial.title);
   const [content, setContent] = useState(initial.content);
   const [parentId, setParentId] = useState<number | null>(initial.parentId);
+  const [comment, setComment] = useState("");
   const [html, setHtml] = useState("");
   const [pane, setPane] = useState<"write" | "preview">("write");
   const [error, setError] = useState<string | null>(null);
@@ -89,20 +90,24 @@ export function Editor({ mode, slug, initial, parents, importMode = false }: Pro
   // Live preview: debounced, rendered and sanitised on the server with the same pipeline as published pages.
   useEffect(() => {
     const ctl = new AbortController();
-    const t = setTimeout(async () => {
-      try {
-        const res = await fetch("/api/render", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content }),
-          signal: ctl.signal,
-        });
-        if (res.ok) setHtml((await res.json()).html ?? "");
-      } catch {
-        /* aborted or offline */
-      }
-    }, 280);
+    const t = setTimeout(
+      () =>
+        void (async () => {
+          try {
+            const res = await fetch("/api/render", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ content }),
+              signal: ctl.signal,
+            });
+            if (res.ok) setHtml((await res.json()).html ?? "");
+          } catch {
+            /* aborted or offline */
+          }
+        })(),
+      280,
+    );
     return () => {
       clearTimeout(t);
       ctl.abort();
@@ -238,7 +243,7 @@ export function Editor({ mode, slug, initial, parents, importMode = false }: Pro
   const save = useCallback(async () => {
     setBusy(true);
     setError(null);
-    const body = { title, content, parentId };
+    const body = { title, content, parentId, comment: comment.trim() || undefined };
     const r =
       mode === "new"
         ? await call<{ slug: string }>("/api/pages", "POST", body)
@@ -252,7 +257,7 @@ export function Editor({ mode, slug, initial, parents, importMode = false }: Pro
     store.del(draftKey);
     router.push(`/w/${r.data.slug}`);
     router.refresh();
-  }, [title, content, parentId, mode, slug, initial.rev, router]);
+  }, [title, content, parentId, comment, mode, slug, initial.rev, router]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -549,7 +554,21 @@ export function Editor({ mode, slug, initial, parents, importMode = false }: Pro
       </div>
       <div className="editor-bar">
         <span className="hint">{dirty ? t("Unsaved changes · Ctrl/⌘+S to save") : t("No changes yet")}</span>
-        <div className="row">
+        <div className="row editor-save">
+          <input
+            className="input edit-summary"
+            value={comment}
+            onChange={(e) => setComment(e.target.value.replace(/[\r\n\t]/g, " "))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !busy && title.trim()) {
+                e.preventDefault();
+                void save();
+              }
+            }}
+            maxLength={200}
+            placeholder={t("What did you change? (optional)")}
+            aria-label={t("Summary of the change")}
+          />
           <button type="button" className="btn ghost" onClick={() => router.back()}>
             {t("Cancel")}
           </button>

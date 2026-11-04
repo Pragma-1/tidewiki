@@ -191,6 +191,18 @@ async function run() {
     ["PUT", "/api/account/profile", 401],
     ["POST", "/api/settings/mail-test", 401],
     ["PUT", "/api/settings", 401],
+    ["GET", "/api/trash", 401],
+    ["DELETE", "/api/trash", 401],
+    ["POST", "/api/trash/1/restore", 401],
+    ["DELETE", "/api/trash/1", 401],
+    ["POST", "/api/pages/welcome/restore", 401],
+    ["GET", "/api/pages/welcome/export?rev=1", 401],
+    ["GET", "/api/backups", 401],
+    ["POST", "/api/backups", 401],
+    ["POST", "/api/backups/upload", 401],
+    ["GET", "/api/backups/20260101-000000-abcdef/download", 401],
+    ["POST", "/api/backups/20260101-000000-abcdef/restore", 401],
+    ["DELETE", "/api/backups/20260101-000000-abcdef", 401],
   ]) {
     const r = await anon.req(m, p, { body: m === "GET" ? undefined : {} });
     ok(r.status === want, `${m} ${p} -> ${r.status} (want ${want})`);
@@ -265,6 +277,9 @@ async function run() {
     ["POST", "/api/settings/mail-test"],
     ["GET", "/api/audit?q=%00%ff&category=__proto__&user=-1&from=1e999&before=NaN&limit=-5"],
     ["GET", "/api/search?q=%F0%9F%92%A9%00&x=%00"],
+    ["POST", "/api/trash/abc/restore"],
+    ["POST", "/api/backups/..%2F..%2Fwiki/restore"],
+    ["GET", "/api/backups/%2e%2e%2fpool/download"],
   ];
   let fuzzN = 0;
   for (const [m, p] of ENDPOINTS) {
@@ -375,6 +390,9 @@ async function run() {
         ["POST", "/api/account/2fa/setup"],
         ["GET", "/api/audit?q=%00&limit=-1&category=__proto__"],
         ["GET", "/api/search?q=%00%ff"],
+        ["GET", "/api/trash"],
+        ["POST", "/api/trash/0/restore"],
+        ["POST", "/api/backups/00000000-000000-000000/restore"],
         ...(isAdmin ? [["POST", "/api/settings/mail-test"]] : []),
       ];
       for (const [m, p] of SAFE) {

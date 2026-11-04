@@ -263,17 +263,57 @@ const SECURITY_SECTIONS: { title: string; rows: Row[]; note?: string }[] = [
   },
 ];
 
+const BACKUP_SECTIONS: { title: string; rows: Row[]; note?: string }[] = [
+  {
+    title: msg("Automatic backups"),
+    rows: [
+      {
+        key: "backup_enabled",
+        kind: "bool",
+        title: msg("Back up automatically"),
+        desc: msg("A full backup (all pages with history, trash, accounts, settings, files) at a fixed interval."),
+      },
+      {
+        key: "backup_interval_hours",
+        kind: "int",
+        min: 1,
+        max: 168,
+        unit: msg("hours"),
+        title: msg("Interval"),
+        desc: msg("Time between two automatic backups. 24 = daily, 168 = weekly."),
+      },
+      {
+        key: "backup_keep",
+        kind: "int",
+        min: 1,
+        max: 100,
+        unit: msg("backups"),
+        title: msg("Keep"),
+        desc: msg(
+          "How many automatic backups are kept; older ones are deleted. Manual and uploaded backups stay until you delete them; of the safety copies made before a restore or import, the newest 5 are kept.",
+        ),
+      },
+    ],
+  },
+];
+
 export function SettingsPanel({
   initial,
   group = "general",
   locked = [],
 }: {
   initial: Settings;
-  group?: "general" | "security" | "legal";
+  group?: "general" | "security" | "legal" | "backups";
   locked?: (keyof Settings)[];
 }) {
   const sections: { title: string; rows: Row[]; note?: string }[] =
-    group === "legal" ? LEGAL_SECTIONS : group === "security" ? SECURITY_SECTIONS : SECTIONS;
+    group === "legal"
+      ? LEGAL_SECTIONS
+      : group === "security"
+        ? SECURITY_SECTIONS
+        : group === "backups"
+          ? BACKUP_SECTIONS
+          : SECTIONS;
   const t = useT();
   const lang = useLang();
   const router = useRouter();
@@ -338,6 +378,7 @@ export function SettingsPanel({
                       min={r.min}
                       max={r.max}
                       defaultValue={s[r.key] as number}
+                      disabled={isLocked}
                       onBlur={(e) => {
                         const v = Number(e.target.value);
                         if (Number.isInteger(v) && v !== s[r.key]) void save(r.key, v);

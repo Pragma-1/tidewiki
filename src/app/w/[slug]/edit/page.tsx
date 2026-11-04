@@ -14,7 +14,7 @@ export default async function EditPage({ params }: { params: Promise<{ slug: str
   const { slug } = await params;
   await gate("edit");
   if (!SLUG_RE.test(slug)) notFound();
-  const page = getPage(slug);
+  const page = await getPage(slug);
   if (!page) notFound();
   return (
     <Shell active={page.slug} rev={page.rev} editing>
@@ -23,7 +23,7 @@ export default async function EditPage({ params }: { params: Promise<{ slug: str
         mode="edit"
         slug={page.slug}
         initial={{ title: page.title, content: page.content, parentId: page.parent_id, rev: page.rev }}
-        parents={parentOptions(getTree(), page.id)}
+        parents={parentOptions(await getTree(), page.id)}
       />
     </Shell>
   );

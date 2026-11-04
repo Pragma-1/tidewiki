@@ -20,12 +20,12 @@ export function DeleteButton({ slug, title }: { slug: string; title: string }) {
         onClick={async () => {
           if (
             !(await confirm({
-              title: t("Delete page?"),
+              title: t("Move page to the trash?"),
               body: t(
-                "Delete “{title}” and its history? Pages inside it move to the top level. This can’t be undone.",
+                "“{title}” and its whole history go to the trash, where editors can restore it for 30 days. Pages inside it move to the top level until then.",
                 { title },
               ),
-              confirmLabel: t("Delete page"),
+              confirmLabel: t("Move to trash"),
               danger: true,
             }))
           )
@@ -49,34 +49,54 @@ export function DeleteButton({ slug, title }: { slug: string; title: string }) {
   );
 }
 
-export function RestoreButton({
+/**
+ * Puts version `rev` back as a new version on top — on the server, so nothing has to round-trip
+ * through the browser and the history records which version it came from.
+ */
+export function RestoreVersionButton({
   slug,
-  title,
-  content,
-  parentId,
+  rev,
   currentRev,
+  compact,
 }: {
   slug: string;
-  title: string;
-  content: string;
-  parentId: number | null;
+  rev: number;
   currentRev: number;
+  compact?: boolean;
 }) {
   const t = useT();
   const router = useRouter();
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dialog, confirm] = useConfirm();
+  const label = t("Restore version {n}", { n: rev });
   return (
     <>
+      {dialog}
       <button
         type="button"
-        className="btn sm"
+        className={compact ? "icon-btn plain" : "btn sm"}
+        title={compact ? label : undefined}
+        aria-label={compact ? label : undefined}
+        disabled={busy}
         onClick={async () => {
-          const r = await call<{ slug: string }>(`/api/pages/${slug}`, "PUT", {
-            title,
-            content,
-            parentId,
+          if (
+            !(await confirm({
+              title: t("Restore version {n}?", { n: rev }),
+              body: t(
+                "Title and text of version {n} become the current version {m}. Nothing is lost: the version you replace stays in the history and can be restored the same way.",
+                { n: rev, m: currentRev + 1 },
+              ),
+              confirmLabel: t("Restore"),
+            }))
+          )
+            return;
+          setBusy(true);
+          const r = await call<{ slug: string }>(`/api/pages/${slug}/restore`, "POST", {
+            rev,
             expectedRev: currentRev,
           });
+          setBusy(false);
           if (r.ok) {
             router.push(`/w/${slug}`);
             router.refresh();
@@ -84,7 +104,7 @@ export function RestoreButton({
         }}
       >
         <RotateCcw size={15} aria-hidden />
-        {t("Restore this version")}
+        {!compact && t("Restore this version")}
       </button>
       {err && (
         <span className="error-text" role="alert">

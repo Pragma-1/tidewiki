@@ -57,3 +57,11 @@ export function slugify(input: string): string {
 }
 
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Optional one-line edit summary ("Typo fixed", "Section 3 rewritten"). */
+export function editComment(v: unknown): string | null {
+  const s = str(v, "Summary", { max: 200, optional: true });
+  if (/[\r\n\t\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(s))
+    throw new HttpError(400, "Summary contains invalid characters.", "comment");
+  return s || null;
+}

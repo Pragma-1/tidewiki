@@ -29,10 +29,10 @@ export default async function Search({ searchParams }: { searchParams: Promise<{
     const user = await getCurrentUser();
     const ip = clientIp(await headers());
     const bucket = user ? `search:u:${user.id}` : `search:${ip ?? "any"}`;
-    if (!consume(bucket, user || ip ? 240 : 3000, 60)) error = t("Slow down a little.");
+    if (!(await consume(bucket, user || ip ? 240 : 3000, 60))) error = t("Slow down a little.");
     else {
       try {
-        result = search(q, { limit: LIMIT, budgetMs: 800 });
+        result = await search(q, { limit: LIMIT, budgetMs: 800 });
       } catch (e) {
         if (e instanceof HttpError) error = t(e.message);
         else throw e;

@@ -9,10 +9,10 @@ export const GET = api(
   "public",
   async ({ req, ip, user }) => {
     const bucket = user ? `search:u:${user.id}` : `search:${ip ?? "any"}`;
-    if (!consume(bucket, user || ip ? 240 : 3000, 60)) throw new HttpError(429, "Slow down a little.");
+    if (!(await consume(bucket, user || ip ? 240 : 3000, 60))) throw new HttpError(429, "Slow down a little.");
     const q = (req.nextUrl.searchParams.get("q") ?? "").slice(0, MAX_QUERY);
     if (!q.trim()) return json({ hits: [], total: 0, partial: false });
-    const r = search(q, { limit: 8, budgetMs: 200 });
+    const r = await search(q, { limit: 8, budgetMs: 200 });
     return json({
       hits: r.hits.map(({ slug, title, snippet }) => ({ slug, title, snippet })),
       total: r.total,

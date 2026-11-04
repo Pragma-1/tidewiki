@@ -11,13 +11,16 @@ import { getSettings } from "@/lib/settings";
 
 /** Privacy notice, terms and imprint: always public, even when the wiki itself requires sign-in. */
 export async function LegalPage({ k }: { k: LegalKey }) {
-  if (!isLegalEnabled(k, getSettings())) notFound(); // terms and imprint can be switched off
+  if (!isLegalEnabled(k, await getSettings())) notFound(); // terms and imprint can be switched off
   const user = await gate("none");
   const lang = await getLang();
   const t = makeT(lang);
-  const page = getLegal(k, lang, { cloudflare: viaCloudflare(await headers()) });
-  const { html } = renderMarkdown(page.content, { lang, autoloadExternal: getSettings().external_media_autoload });
-  const missing = user?.role === "admin" && !page.custom ? missingOperatorFields() : [];
+  const page = await getLegal(k, lang, { cloudflare: viaCloudflare(await headers()) });
+  const { html } = renderMarkdown(page.content, {
+    lang,
+    autoloadExternal: (await getSettings()).external_media_autoload,
+  });
+  const missing = user?.role === "admin" && !page.custom ? await missingOperatorFields() : [];
   return (
     <Shell live={false}>
       {user?.role === "admin" && (

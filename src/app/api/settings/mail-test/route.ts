@@ -14,10 +14,10 @@ export const dynamic = "force-dynamic";
  * address, so the button can't be used to send mail to arbitrary recipients.
  */
 export const POST = api("admin", async ({ user, ip, t, lang }) => {
-  if (!consume(`mailtest:${user!.id}`, 5, 600))
+  if (!(await consume(`mailtest:${user!.id}`, 5, 600)))
     throw new HttpError(429, "Too many test e-mails. Try again in a few minutes.");
-  if (!isMailConfigured()) throw new HttpError(400, "E-mail is not configured.");
-  const site = getSettings().site_name;
+  if (!(await isMailConfigured())) throw new HttpError(400, "E-mail is not configured.");
+  const site = (await getSettings()).site_name;
   const mail = renderMail({
     site,
     heading: t("Your e-mail settings work"),
@@ -31,7 +31,7 @@ export const POST = api("admin", async ({ user, ip, t, lang }) => {
     ],
     facts: [
       [t("Sent at"), formatDate(Math.floor(Date.now() / 1000), lang, true)],
-      [t("Configuration"), mailSource() === "settings" ? t("Settings → E-mail") : t("Environment (.env)")],
+      [t("Configuration"), (await mailSource()) === "settings" ? t("Settings → E-mail") : t("Environment (.env)")],
       [t("Wiki address"), BASE_URL],
     ],
     button: { label: t("Open {site}", { site }), url: BASE_URL },
@@ -41,9 +41,9 @@ export const POST = api("admin", async ({ user, ip, t, lang }) => {
     await sendMail(user!.email, t("{site}: test e-mail", { site }), mail.text, mail.html);
   } catch (e) {
     const reason = mailErrorReason(e);
-    audit("admin.mail_test", user!.id, ip, `failed: ${reason}`.slice(0, 300));
+    await audit("admin.mail_test", user!.id, ip, `failed: ${reason}`.slice(0, 300));
     throw new HttpError(502, t("Sending failed: {reason}", { reason: t(reason) }));
   }
-  audit("admin.mail_test", user!.id, ip, "ok");
+  await audit("admin.mail_test", user!.id, ip, "ok");
   return json({ ok: true, to: user!.email });
 });

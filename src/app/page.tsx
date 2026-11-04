@@ -12,9 +12,9 @@ const flatten = (n: TreeNode): TreeNode[] => n.children.flatMap((c) => [c, ...fl
 
 export default async function Home() {
   const user = await gate("read");
-  const cfg = getSettings();
-  const tree = getTree();
-  const recent = recentPages(8);
+  const cfg = await getSettings();
+  const tree = await getTree();
+  const recent = await recentPages(8);
   const canEdit = !!user && user.role !== "viewer";
   const lang = await getLang();
   const t = makeT(lang);

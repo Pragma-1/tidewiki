@@ -2,10 +2,11 @@ import nodemailer from "nodemailer";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { readFileSync } from "node:fs";
-import { db } from "./db";
+import { one, run, sql } from "./db";
 import { decrypt, encrypt } from "./crypto";
 import { getSettings } from "./settings";
 import { HttpError } from "./validate";
+import { forbiddenAddress } from "./net-guard";
 
 /*
  * Outgoing mail. Configuration comes from Settings → E-mail when a host is set there, otherwise
@@ -37,18 +38,19 @@ function envSecret(name: string): string | undefined {
 const PW_KEY = "smtp_password_enc"; // not part of SETTING_DEFS, so the settings API can never return it
 const PW_AAD = "smtp:password";
 
-export function setSmtpPassword(plain: string | null) {
+export async function setSmtpPassword(plain: string | null) {
   if (plain === null || plain === "") {
-    db().prepare("DELETE FROM settings WHERE key=?").run(PW_KEY);
+    await run(sql`DELETE FROM settings WHERE key = ${PW_KEY}`);
     return;
   }
-  db()
-    .prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(PW_KEY, JSON.stringify(encrypt(plain, PW_AAD)));
+  await run(
+    sql`INSERT INTO settings(key, value) VALUES (${PW_KEY}, ${JSON.stringify(encrypt(plain, PW_AAD))})
+        ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  );
 }
-export const hasSmtpPassword = () => !!db().prepare("SELECT 1 FROM settings WHERE key=?").get(PW_KEY);
-function storedSmtpPassword(): string | undefined {
-  const row = db().prepare("SELECT value FROM settings WHERE key=?").get(PW_KEY) as { value: string } | undefined;
+export const hasSmtpPassword = async () => !!(await one(sql`SELECT 1 FROM settings WHERE key = ${PW_KEY}`));
+async function storedSmtpPassword(): Promise<string | undefined> {
+  const row = await one<{ value: string }>(sql`SELECT value FROM settings WHERE key = ${PW_KEY}`);
   if (!row) return undefined;
   try {
     return decrypt(JSON.parse(row.value), PW_AAD);
@@ -70,8 +72,8 @@ type MailConfig = {
   allowSelfSigned: boolean;
 };
 
-function config(): MailConfig | null {
-  const s = getSettings();
+async function config(): Promise<MailConfig | null> {
+  const s = await getSettings();
   if (s.smtp_host) {
     if (!s.smtp_from) return null;
     return {
@@ -80,7 +82,7 @@ function config(): MailConfig | null {
       port: s.smtp_port,
       security: s.smtp_security,
       user: s.smtp_user || undefined,
-      pass: s.smtp_user ? storedSmtpPassword() : undefined,
+      pass: s.smtp_user ? await storedSmtpPassword() : undefined,
       from: { name: s.site_name, address: s.smtp_from },
       allowSelfSigned: s.smtp_allow_self_signed,
     };
@@ -101,19 +103,8 @@ function config(): MailConfig | null {
   };
 }
 
-export const isMailConfigured = () => config() !== null;
-export const mailSource = (): "settings" | "env" | "none" => config()?.source ?? "none";
-
-/** Addresses the SMTP client must never connect to: unspecified, link-local (cloud metadata) and multicast. */
-function forbiddenAddress(ip: string): boolean {
-  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
-  if (isIP(v4) === 4) {
-    const [a, b] = v4.split(".").map(Number);
-    return a === 0 || (a === 169 && b === 254) || a >= 224;
-  }
-  const l = ip.toLowerCase();
-  return l === "::" || /^fe[89ab]/.test(l) || l.startsWith("ff");
-}
+export const isMailConfigured = async () => (await config()) !== null;
+export const mailSource = async (): Promise<"settings" | "env" | "none"> => (await config())?.source ?? "none";
 
 async function transportFor(c: MailConfig) {
   if (c.source === "settings") {
@@ -151,7 +142,7 @@ async function transportFor(c: MailConfig) {
 
 /** Sends one mail. `text` is always included; `html` is the styled variant built by mail-template.ts. */
 export async function sendMail(to: string, subject: string, text: string, html?: string): Promise<void> {
-  const c = config();
+  const c = await config();
   if (!c) throw new HttpError(400, "E-mail is not configured.");
   const tr = await transportFor(c);
   try {

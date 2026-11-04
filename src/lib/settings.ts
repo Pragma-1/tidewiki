@@ -1,4 +1,4 @@
-import { db } from "./db";
+import { all, run, sql, tx } from "./db";
 
 type Def =
   | { type: "bool"; default: boolean }
@@ -38,6 +38,17 @@ export const SETTING_DEFS = {
   // legal pages: the privacy notice is always on; terms and imprint can be switched off (e.g. a private wiki)
   legal_terms_enabled: { type: "bool", default: true },
   legal_imprint_enabled: { type: "bool", default: true },
+  // backups
+  backup_enabled: { type: "bool", default: true },
+  backup_interval_hours: { type: "int", default: 24, min: 1, max: 168 },
+  backup_keep: { type: "int", default: 14, min: 1, max: 100 },
+  backup_target: { type: "enum", default: "local", values: ["local", "s3"] },
+  backup_s3_endpoint: { type: "text", default: "", max: 300 },
+  backup_s3_region: { type: "text", default: "us-east-1", max: 40 },
+  backup_s3_bucket: { type: "text", default: "", max: 63 },
+  backup_s3_prefix: { type: "text", default: "tidewiki/", max: 330 },
+  backup_s3_access_key: { type: "text", default: "", max: 128 },
+  backup_s3_path_style: { type: "bool", default: true },
   // operator details for the legal pages (Impressum § 5 DDG, Art. 13 GDPR controller)
   operator_name: { type: "text", default: "", max: 120 },
   operator_address: { type: "text", default: "", max: 300, multiline: true },
@@ -76,6 +87,16 @@ export type Settings = {
   external_media_autoload: boolean;
   legal_terms_enabled: boolean;
   legal_imprint_enabled: boolean;
+  backup_enabled: boolean;
+  backup_interval_hours: number;
+  backup_keep: number;
+  backup_target: "local" | "s3";
+  backup_s3_endpoint: string;
+  backup_s3_region: string;
+  backup_s3_bucket: string;
+  backup_s3_prefix: string;
+  backup_s3_access_key: string;
+  backup_s3_path_style: boolean;
   operator_name: string;
   operator_address: string;
   operator_email: string;
@@ -119,8 +140,8 @@ export function coerce(def: Def, v: unknown): string | number | boolean | null {
   }
 }
 
-export function getSettings(): Settings {
-  const rows = db().prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+export async function getSettings(): Promise<Settings> {
+  const rows = await all<{ key: string; value: string }>(sql`SELECT key, value FROM settings`);
   const map = new Map(rows.map((r) => [r.key, r.value]));
   const out: Record<string, unknown> = {};
   for (const [k, def] of Object.entries(SETTING_DEFS) as [SettingKey, Def][]) {
@@ -131,7 +152,9 @@ export function getSettings(): Settings {
 }
 
 /** Whitelist-only update: unknown keys and invalid values are rejected, never stored. */
-export function updateSettings(input: Record<string, unknown>): { ok: true } | { ok: false; error: string } {
+export async function updateSettings(
+  input: Record<string, unknown>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const entries = Object.entries(input);
   if (entries.length === 0) return { ok: false, error: "No settings supplied." };
   const clean: [string, unknown][] = [];
@@ -143,11 +166,28 @@ export function updateSettings(input: Record<string, unknown>): { ok: true } | {
     if (c === null) return { ok: false, error: `Invalid value for ${k}.` };
     clean.push([k, c]);
   }
-  const stmt = db().prepare(
-    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-  );
-  db().transaction(() => {
-    for (const [k, v] of clean) stmt.run(k, JSON.stringify(v));
-  })();
+  await tx(async () => {
+    for (const [k, v] of clean)
+      await run(
+        sql`INSERT INTO settings(key, value) VALUES (${k}, ${JSON.stringify(v)})
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      );
+  });
   return { ok: true };
+}
+
+/**
+ * Settings as sent to a browser. The S3 connection details (endpoint, bucket, access key id) are
+ * the owner's business: other administrators get blanks.
+ */
+export function settingsForClient(s: Settings, isOwner: boolean): Settings {
+  if (isOwner) return s;
+  return {
+    ...s,
+    backup_s3_endpoint: "",
+    backup_s3_region: "",
+    backup_s3_bucket: "",
+    backup_s3_prefix: "",
+    backup_s3_access_key: "",
+  };
 }

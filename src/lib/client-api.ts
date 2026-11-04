@@ -9,7 +9,7 @@ export type ApiResult<T = Record<string, unknown>> = {
 /** Small fetch wrapper: JSON in, JSON out, same-origin cookies. Never throws on HTTP errors. */
 export async function call<T = Record<string, unknown>>(
   url: string,
-  method: "POST" | "PUT" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   body?: unknown,
 ): Promise<ApiResult<T>> {
   try {

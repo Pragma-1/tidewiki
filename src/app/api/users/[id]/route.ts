@@ -36,6 +36,6 @@ export const PATCH = api<P>("admin", async ({ body, user, ip, params }) => {
 });
 
 export const DELETE = api<P>("admin", async ({ user, ip, params }) => {
-  deleteUser(user!.id, idOf(params.id), ip);
+  await deleteUser(user!.id, idOf(params.id), ip);
   return json({ ok: true });
 });

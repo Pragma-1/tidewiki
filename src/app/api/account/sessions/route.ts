@@ -9,9 +9,9 @@ export const POST = api(
   "user",
   async ({ body, user, ip }) => {
     const b = await body();
-    if (b.action === "revoke_others") return json({ ok: true, revoked: revokeOtherSessions(user!, ip) });
+    if (b.action === "revoke_others") return json({ ok: true, revoked: await revokeOtherSessions(user!, ip) });
     if (b.action !== "revoke") throw new HttpError(400, "Unknown action.");
-    const { current } = revokeOwnSession(user!, str(b.id, "Session", { max: 64 }), ip);
+    const { current } = await revokeOwnSession(user!, str(b.id, "Session", { max: 64 }), ip);
     const res = json({ ok: true, current });
     if (current) res.cookies.set(SESSION_COOKIE, "", cookieOpts(0));
     return res;

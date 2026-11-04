@@ -10,7 +10,7 @@ export const POST = api(
   async ({ body, user }) => {
     const b = await body();
     if (b.confirm !== true) throw new HttpError(400, "Please confirm that you want to delete your account.", "confirm");
-    await eraseOwnAccount(user!.id, str(b.password, "Password", { max: 256, trim: false }));
+    await eraseOwnAccount(user!, str(b.password, "Password", { max: 256, trim: false }));
     const res = json({ ok: true });
     res.cookies.set(SESSION_COOKIE, "", cookieOpts(0));
     return res;

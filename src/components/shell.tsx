@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { BookOpen, ChevronRight, FilePlus2, FileUp, History, Settings, UserRound, LogIn } from "lucide-react";
+import { BookOpen, ChevronRight, FilePlus2, FileUp, History, Settings, Trash2, UserRound, LogIn } from "lucide-react";
 import type { ReactNode } from "react";
 import { getCurrentUser } from "@/lib/session-cookie";
 import { getSettings } from "@/lib/settings";
 import { getTree, type TreeNode } from "@/lib/pages";
+import { trashCount } from "@/lib/trash";
 import { getLang } from "@/lib/i18n-server";
 import { makeT } from "@/lib/i18n";
 import { LiveUpdates, LogoutButton, MenuButton, NavDrawer, ThemeToggle } from "./chrome";
@@ -54,11 +55,12 @@ export async function Shell({
   editing?: boolean;
   wide?: boolean;
 }) {
-  const [user, cfg, lang] = [await getCurrentUser(), getSettings(), await getLang()];
+  const [user, cfg, lang] = [await getCurrentUser(), await getSettings(), await getLang()];
   const t = makeT(lang);
   const canRead = !!user || cfg.public_read;
   const canEdit = !!user && user.role !== "viewer" && !user.needs2faSetup;
-  const tree = canRead ? getTree() : [];
+  const tree = canRead ? await getTree() : [];
+  const trashed = canEdit ? await trashCount() : 0;
   return (
     <>
       <a className="skip" href="#main">
@@ -125,6 +127,17 @@ export async function Shell({
                 <Link className="rail-link" href="/changes">
                   <History size={15} aria-hidden />
                   {t("Recent changes")}
+                </Link>
+              )}
+              {canEdit && (
+                <Link className="rail-link" href="/trash">
+                  <Trash2 size={15} aria-hidden />
+                  {t("Trash")}
+                  {trashed > 0 && (
+                    <span className="count" aria-label={t("{n} pages", { n: trashed })}>
+                      {trashed}
+                    </span>
+                  )}
                 </Link>
               )}
             </div>

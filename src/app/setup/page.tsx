@@ -10,11 +10,11 @@ export async function generateMetadata() {
   return { title: (await getT())("Set up your wiki") };
 }
 
-export default function Setup() {
-  if (userCount() > 0) redirect("/"); // setup page disappears once an administrator exists
+export default async function Setup() {
+  if ((await userCount()) > 0) redirect("/"); // setup page disappears once an administrator exists
   return (
     <Shell live={false}>
-      <SetupForm policy={policyFromSettings(getSettings())} />
+      <SetupForm policy={policyFromSettings(await getSettings())} />
     </Shell>
   );
 }

@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 import { ArrowLeft, ArrowRight, Download, History, Link2, Pencil } from "lucide-react";
 import { Shell } from "@/components/shell";
 import { DeleteButton } from "@/components/page-actions";
+import { Notice } from "@/components/ui";
 import { gate } from "@/lib/guard";
 import { backlinks, breadcrumbs, getPage, getTree, readingOrder, type TreeNode } from "@/lib/pages";
 import { renderMarkdown } from "@/lib/markdown";
@@ -13,7 +14,7 @@ import { SLUG_RE } from "@/lib/validate";
 import { getSettings } from "@/lib/settings";
 export const dynamic = "force-dynamic";
 
-type Props = { params: Promise<{ slug: string }> };
+type Props = { params: Promise<{ slug: string }>; searchParams?: Promise<{ moved?: string }> };
 const find = (nodes: TreeNode[], id: number): TreeNode | undefined => {
   for (const n of nodes) {
     if (n.id === id) return n;
@@ -25,27 +26,31 @@ const find = (nodes: TreeNode[], id: number): TreeNode | undefined => {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
   const t = makeT(await getLang());
-  return { title: SLUG_RE.test(slug) ? (getPage(slug)?.title ?? t("Page not found")) : t("Page not found") };
+  return { title: SLUG_RE.test(slug) ? ((await getPage(slug))?.title ?? t("Page not found")) : t("Page not found") };
 }
 
-export default async function WikiPage({ params }: Props) {
+export default async function WikiPage({ params, searchParams }: Props) {
   const { slug } = await params;
+  const moved = (await searchParams)?.moved === "1";
   const user = await gate("read");
   if (!SLUG_RE.test(slug) || slug.length > 80) notFound();
-  const page = getPage(slug);
+  const page = await getPage(slug);
   if (!page) notFound();
-  const children = find(getTree(), page.id)?.children ?? [];
+  const children = find(await getTree(), page.id)?.children ?? [];
   const canEdit = !!user && user.role !== "viewer";
   const canDelete = !!user && (user.role === "admin" || (user.role !== "viewer" && page.created_by === user.id));
-  const crumbs = breadcrumbs(page);
-  const linkedFrom = backlinks(page.slug);
-  const order = readingOrder();
+  const crumbs = await breadcrumbs(page);
+  const linkedFrom = await backlinks(page.slug);
+  const order = await readingOrder();
   const at = order.findIndex((o) => o.slug === page.slug);
   const prev = at > 0 ? order[at - 1] : null,
     next = at >= 0 && at < order.length - 1 ? order[at + 1] : null;
   const lang = await getLang();
   const t = makeT(lang);
-  const { html, toc } = renderMarkdown(page.content, { lang, autoloadExternal: getSettings().external_media_autoload });
+  const { html, toc } = renderMarkdown(page.content, {
+    lang,
+    autoloadExternal: (await getSettings()).external_media_autoload,
+  });
   return (
     <Shell active={page.slug} rev={page.rev}>
       <div className="doc-grid">
@@ -58,6 +63,16 @@ export default async function WikiPage({ params }: Props) {
                 </span>
               ))}
             </nav>
+          )}
+          {moved && canEdit && (
+            <Notice>
+              {t(
+                "Restored from the trash. Another page took the old address meanwhile, so this one is now at /w/{slug}.",
+                {
+                  slug: page.slug,
+                },
+              )}
+            </Notice>
           )}
           <div className="doc-head">
             <div>

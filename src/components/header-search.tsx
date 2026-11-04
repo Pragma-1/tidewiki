@@ -62,24 +62,28 @@ export function HeaderSearch() {
     }
     const ctl = new AbortController();
     setBusy(true);
-    const h = setTimeout(async () => {
-      try {
-        const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
-          credentials: "same-origin",
-          signal: ctl.signal,
-        });
-        if (r.ok) {
-          const j = (await r.json()) as { hits: Hit[]; total: number };
-          setHits(Array.isArray(j.hits) ? j.hits : []);
-          setTotal(Number(j.total) || 0);
-          setSel(-1);
-        }
-      } catch {
-        /* aborted or offline */
-      } finally {
-        if (!ctl.signal.aborted) setBusy(false);
-      }
-    }, 180);
+    const h = setTimeout(
+      () =>
+        void (async () => {
+          try {
+            const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
+              credentials: "same-origin",
+              signal: ctl.signal,
+            });
+            if (r.ok) {
+              const j = (await r.json()) as { hits: Hit[]; total: number };
+              setHits(Array.isArray(j.hits) ? j.hits : []);
+              setTotal(Number(j.total) || 0);
+              setSel(-1);
+            }
+          } catch {
+            /* aborted or offline */
+          } finally {
+            if (!ctl.signal.aborted) setBusy(false);
+          }
+        })(),
+      180,
+    );
     return () => {
       clearTimeout(h);
       ctl.abort();

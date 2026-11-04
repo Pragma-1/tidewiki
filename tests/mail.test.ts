@@ -1,7 +1,7 @@
 import "./setup-env";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:net";
-import { db } from "@/lib/db";
+import { db } from "./pg";
 import { getSettings, updateSettings } from "@/lib/settings";
 import { hasSmtpPassword, isMailConfigured, mailErrorReason, mailSource, sendMail, setSmtpPassword } from "@/lib/mail";
 import { renderMail } from "@/lib/mail-template";
@@ -49,7 +49,7 @@ function fakeSmtp(port: number) {
 }
 
 describe("mail template", () => {
-  it("escapes every value and only allows http(s) links", () => {
+  it("escapes every value and only allows http(s) links", async () => {
     const m = renderMail({
       site: `<script>alert(1)</script>`,
       heading: `"><img src=x onerror=alert(1)>`,
@@ -81,26 +81,27 @@ describe("SMTP from the settings page", () => {
   beforeAll(() => smtp.start());
   afterAll(() => smtp.stop());
 
-  it("is not configured until host and sender are set", () => {
-    expect(isMailConfigured()).toBe(false);
-    expect(mailSource()).toBe("none");
-    updateSettings({ smtp_host: "127.0.0.1", smtp_port: 2525, smtp_security: "none" });
-    expect(isMailConfigured()).toBe(false); // no sender yet
-    updateSettings({ smtp_from: "wiki@example.org" });
-    expect(isMailConfigured()).toBe(true);
-    expect(mailSource()).toBe("settings");
+  it("is not configured until host and sender are set", async () => {
+    expect(await isMailConfigured()).toBe(false);
+    expect(await mailSource()).toBe("none");
+    await updateSettings({ smtp_host: "127.0.0.1", smtp_port: 2525, smtp_security: "none" });
+    expect(await isMailConfigured()).toBe(false); // no sender yet
+    await updateSettings({ smtp_from: "wiki@example.org" });
+    expect(await isMailConfigured()).toBe(true);
+    expect(await mailSource()).toBe("settings");
   });
 
-  it("stores the password encrypted and never in the regular settings", () => {
-    setSmtpPassword("S3cret-smtp-pass");
-    expect(hasSmtpPassword()).toBe(true);
-    const raw = (db().prepare("SELECT value FROM settings WHERE key='smtp_password_enc'").get() as { value: string })
-      .value;
+  it("stores the password encrypted and never in the regular settings", async () => {
+    await setSmtpPassword("S3cret-smtp-pass");
+    expect(await hasSmtpPassword()).toBe(true);
+    const raw = (
+      (await db().prepare("SELECT value FROM settings WHERE key='smtp_password_enc'").get()) as { value: string }
+    ).value;
     expect(raw).not.toContain("S3cret");
-    expect(JSON.stringify(getSettings())).not.toContain("S3cret");
-    expect(updateSettings({ smtp_password_enc: "x" } as never)).toMatchObject({ ok: false }); // not writable through settings
-    setSmtpPassword(null);
-    expect(hasSmtpPassword()).toBe(false);
+    expect(JSON.stringify(await getSettings())).not.toContain("S3cret");
+    expect(await updateSettings({ smtp_password_enc: "x" } as never)).toMatchObject({ ok: false }); // not writable through settings
+    await setSmtpPassword(null);
+    expect(await hasSmtpPassword()).toBe(false);
   });
 
   it("sends a multipart mail with the HTML design and a text part; header injection is impossible", async () => {
@@ -116,18 +117,18 @@ describe("SMTP from the settings page", () => {
   });
 
   it("refuses ports that aren't mail ports and link-local / metadata addresses", async () => {
-    updateSettings({ smtp_port: 6379 });
+    await updateSettings({ smtp_port: 6379 });
     await expect(sendMail("a@example.org", "s", "t")).rejects.toThrow(/port is not allowed/);
-    updateSettings({ smtp_port: 587, smtp_host: "169.254.169.254" });
+    await updateSettings({ smtp_port: 587, smtp_host: "169.254.169.254" });
     await expect(sendMail("a@example.org", "s", "t")).rejects.toThrow(/address is not allowed/);
-    updateSettings({ smtp_host: "0.0.0.0" });
+    await updateSettings({ smtp_host: "0.0.0.0" });
     await expect(sendMail("a@example.org", "s", "t")).rejects.toThrow(/address is not allowed/);
-    updateSettings({ smtp_host: "no-such-host.invalid" });
+    await updateSettings({ smtp_host: "no-such-host.invalid" });
     await expect(sendMail("a@example.org", "s", "t")).rejects.toThrow(/could not be resolved/);
-    updateSettings({ smtp_host: "127.0.0.1", smtp_port: 2525 });
+    await updateSettings({ smtp_host: "127.0.0.1", smtp_port: 2525 });
   });
 
-  it("turns SMTP errors into one short, single-line reason", () => {
+  it("turns SMTP errors into one short, single-line reason", async () => {
     const e = Object.assign(new Error("Invalid login:\r\n535 5.7.8 nope " + "x".repeat(500)), { code: "EAUTH" });
     const r = mailErrorReason(e);
     expect(r).not.toMatch(/[\r\n]/);

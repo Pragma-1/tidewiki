@@ -49,6 +49,11 @@ export function loadMasterKey(): Buffer {
   return master;
 }
 
+/** Tests only: forget the cached key, so the next use reads WIKI_MASTER_KEY / master.key again. */
+export const resetMasterKeyForTests = () => {
+  master = null;
+};
+
 export function deriveKey(purpose: "pepper" | "aes" | "hmac"): Buffer {
   return Buffer.from(hkdfSync("sha256", loadMasterKey(), Buffer.from("tidewiki/v1"), Buffer.from(purpose), 32));
 }

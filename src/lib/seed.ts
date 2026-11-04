@@ -1,4 +1,4 @@
-import { db, now } from "./db";
+import { all, one, run, sql, tx, now } from "./db";
 import { publish } from "./events";
 import type { Lang } from "./i18n";
 
@@ -317,29 +317,31 @@ export const SYSTEM_PAGES: Record<
 };
 
 /** Inserted inside the setup transaction, so a fresh wiki is never empty. */
-export function seedPages(userId: number, lang: Lang) {
+export async function seedPages(userId: number, lang: Lang) {
   const t = now();
-  const ins = db().prepare(
-    "INSERT INTO pages(slug,title,parent_id,position,content,rev,created_by,updated_by,created_at,updated_at,system_key) VALUES(?,?,NULL,?,?,1,?,?,?,?,?)",
-  );
-  const rev = db().prepare(
-    "INSERT INTO page_revisions(page_id,rev,title,content,author_id,created_at) VALUES(?,?,?,?,?,?)",
-  );
-  Object.entries(SYSTEM_PAGES).forEach(([key, sp], i) => {
+  let i = 0;
+  for (const [key, sp] of Object.entries(SYSTEM_PAGES)) {
     const v = sp.versions[lang];
-    const id = Number(ins.run(sp.slug, v.title, i + 1, v.content, userId, userId, t, t, key).lastInsertRowid);
-    rev.run(id, 1, v.title, v.content, userId, t);
-  });
+    const r = await one<{ id: number }>(
+      sql`INSERT INTO pages(slug, title, parent_id, position, content, rev, created_by, updated_by, created_at, updated_at, system_key)
+          VALUES (${sp.slug}, ${v.title}, NULL, ${++i}, ${v.content}, 1, ${userId}, ${userId}, ${t}, ${t}, ${key})
+          RETURNING id`,
+    );
+    await run(
+      sql`INSERT INTO page_revisions(page_id, rev, title, content, author_id, created_at)
+          VALUES (${r!.id}, 1, ${v.title}, ${v.content}, ${userId}, ${t})`,
+    );
+  }
 }
 
 /**
  * Switches built-in pages to the site language — but only while nobody has edited them, i.e.
  * while title and text still match one of the shipped versions exactly. Edited pages are never touched.
  */
-export function syncSystemPages(lang: Lang): number {
-  const rows = db()
-    .prepare("SELECT id, slug, title, content, rev, system_key FROM pages WHERE system_key IS NOT NULL")
-    .all() as { id: number; slug: string; title: string; content: string; rev: number; system_key: string }[];
+export async function syncSystemPages(lang: Lang): Promise<number> {
+  const rows = await all<{ id: number; slug: string; title: string; content: string; rev: number; system_key: string }>(
+    sql`SELECT id, slug, title, content, rev, system_key FROM pages WHERE system_key IS NOT NULL`,
+  );
   let changed = 0;
   for (const r of rows) {
     const sp = SYSTEM_PAGES[r.system_key];
@@ -350,19 +352,23 @@ export function syncSystemPages(lang: Lang): number {
       (v) => v.title === r.title && v.content === r.content,
     );
     if (!pristine) continue;
-    const t = now(),
-      rev = r.rev + 1;
-    db()
-      .transaction(() => {
-        db()
-          .prepare("UPDATE pages SET title=?, content=?, rev=?, updated_at=? WHERE id=?")
-          .run(target.title, target.content, rev, t, r.id);
-        db()
-          .prepare("INSERT INTO page_revisions(page_id,rev,title,content,author_id,created_at) VALUES(?,?,?,?,NULL,?)")
-          .run(r.id, rev, target.title, target.content, t);
-      })
-      .immediate();
-    publish({ type: "page.updated", slug: r.slug, title: target.title, rev });
+    const t = now();
+    const done = await tx(async () => {
+      // only if nobody saved in between (the text is still the pristine one we compared)
+      const rev = r.rev + 1;
+      const n = await run(
+        sql`UPDATE pages SET title = ${target.title}, content = ${target.content}, rev = ${rev}, updated_at = ${t}
+            WHERE id = ${r.id} AND rev = ${r.rev}`,
+      );
+      if (n !== 1) return false;
+      await run(
+        sql`INSERT INTO page_revisions(page_id, rev, title, content, author_id, created_at)
+            VALUES (${r.id}, ${rev}, ${target.title}, ${target.content}, NULL, ${t})`,
+      );
+      return true;
+    });
+    if (!done) continue;
+    publish({ type: "page.updated", slug: r.slug, title: target.title, rev: r.rev + 1 });
     changed++;
   }
   return changed;

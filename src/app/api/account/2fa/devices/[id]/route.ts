@@ -23,7 +23,7 @@ export const PATCH = api<{ id: string }>(
   "user",
   async ({ body, user, ip, params }) => {
     const b = await body();
-    renameDevice(user!, deviceId(params.id), b.name, ip);
+    await renameDevice(user!, deviceId(params.id), b.name, ip);
     return json({ ok: true });
   },
   { allowPending2fa: true },

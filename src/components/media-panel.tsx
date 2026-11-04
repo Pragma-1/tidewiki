@@ -97,11 +97,7 @@ export function MediaPanel({ files, used, quota }: { files: File[]; used: number
                 <td>
                   <div className="file-cell">
                     {f.kind === "image" ? (
-                      /* eslint-disable-next-line @next/next/no-img-element */ <img
-                        src={`/media/${f.name}`}
-                        alt=""
-                        loading="lazy"
-                      />
+                      <img src={`/media/${f.name}`} alt="" loading="lazy" />
                     ) : (
                       <span className="thumb">
                         <Film size={20} aria-hidden />

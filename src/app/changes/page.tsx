@@ -15,7 +15,7 @@ export default async function Changes({ searchParams }: { searchParams: Promise<
   const before = b && /^\d{1,12}$/.test(b) ? Number(b) : undefined;
   const lang = await getLang();
   const t = makeT(lang);
-  const rows = recentChanges(50, before);
+  const rows = await recentChanges(50, before);
   return (
     <Shell wide>
       <h1 style={{ marginTop: 0 }}>{t("Recent changes")}</h1>
@@ -41,6 +41,13 @@ export default async function Changes({ searchParams }: { searchParams: Promise<
                   <td className="nowrap">{formatDate(r.created_at, lang)}</td>
                   <td>
                     <Link href={`/w/${r.slug}`}>{r.title}</Link>
+                    {(r.comment || r.restored_from !== null) && (
+                      <div className="meta">
+                        {r.restored_from !== null && t("restored from version {n}", { n: r.restored_from })}
+                        {r.restored_from !== null && r.comment && " · "}
+                        {r.comment && <em>{r.comment}</em>}
+                      </div>
+                    )}
                   </td>
                   <td>{r.rev === 1 ? <span className="badge">{t("new")}</span> : r.rev}</td>
                   <td>{r.author ?? <span className="hint">{t("deleted account or system")}</span>}</td>

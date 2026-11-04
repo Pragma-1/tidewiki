@@ -13,7 +13,7 @@ export async function generateMetadata() {
 export default async function Register() {
   const user = await gate("none");
   if (user) redirect("/");
-  const cfg = getSettings();
+  const cfg = await getSettings();
   const t = await getT();
   if (!cfg.allow_registration)
     return (
