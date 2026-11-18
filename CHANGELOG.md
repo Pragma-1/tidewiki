@@ -43,7 +43,7 @@ On its first start against the empty database the wiki imports `data/wiki.db` on
 
 ### Security
 
-- **Deleted data is really gone from the database files.** Erasing an account, deleting a page for good and deleting a file now rewrite the affected tables (`VACUUM FULL`); before, a plain `VACUUM` left the deleted text in PostgreSQL's files until overwritten (a new test reads the raw files). A busy table is retried from a persistent list, so a wipe is never forgotten. Expired IP addresses and log entries get the same treatment.
+- **Deleted data is really gone from the database files.** Erasing an account, deleting a page for good and deleting a file now rewrite the affected tables (`VACUUM FULL`); before, a plain `VACUUM` left the deleted text in PostgreSQL's files until overwritten (a new test reads the raw files). A busy table is retried from a persistent list, so a wipe is never forgotten. If an older snapshot (a running backup, a slow request, PostgreSQL's own ANALYZE) still keeps deleted rows alive, PostgreSQL says so and the wipe is repeated after 30 s, 2 min and 10 min, then hourly — it only counts as done once the rows are really gone. Expired IP addresses and log entries get the same treatment.
 - Deleted uploads were already removed from disk; now files a crash left without an entry and abandoned partial uploads are removed too (hourly and with _Unbenutzte löschen_).
 - Next.js 16.4.6 (fixes GHSA-mfr8-8qww-v76h and GHSA-vc7v-qv4w-wrv8; Tidewiki doesn't use the affected `use cache`, so it wasn't exposed).
 - Moving a page now checks the depth of its sub-pages too, so they can't end up nested deeper than allowed.

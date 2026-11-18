@@ -306,13 +306,23 @@ const VACUUMABLE = [
 export type WipeTable = (typeof VACUUMABLE)[number];
 
 const WIPE_KEY = "wipe_pending";
-const gw = globalThis as unknown as { __wikiWipe?: Promise<void> };
+const gw = globalThis as unknown as {
+  __wikiWipe?: Promise<void>;
+  __wikiWipeRetry?: { timer: ReturnType<typeof setTimeout> | null; attempt: number };
+};
+/** Seconds until the next try when rows couldn't be removed yet; after that the hourly job. */
+const WIPE_RETRY_S = [30, 120, 600];
 
 /**
  * Removes deleted rows from the database files for good, after an erasure, a final deletion or
  * a deleted file. A DELETE only marks a row dead, and a plain VACUUM only marks its space as
  * reusable — the old bytes stay in the table file until something overwrites them (checked in
  * tests/wipe.test.ts). VACUUM FULL writes the table into a new file and removes the old one.
+ *
+ * VACUUM FULL keeps deleted rows that an older snapshot could still see — a backup that is
+ * running, a slow request, PostgreSQL's own ANALYZE. It says so ("N dead row versions cannot be
+ * removed yet"); then the table stays on the list and is tried again shortly (30 s, 2 min,
+ * 10 min, then hourly), so "succeeded" really means the rows are gone.
  *
  * It needs the table to itself for a moment. So it waits at most 2 s for that (readers queue
  * behind it meanwhile) and otherwise leaves the table on a persistent to-do list that the hourly
@@ -337,14 +347,25 @@ export function wipe(tables: readonly WipeTable[]): Promise<void> {
     const left: WipeTable[] = [];
     for (const t of todo) {
       const c = await pool().connect();
+      // VERBOSE reports "<n> dead row versions cannot be removed yet" as the detail of an INFO
+      // message; the number comes first in every language PostgreSQL speaks
+      let kept = 0;
+      const onNotice = (n: { detail?: string }) => {
+        const m = /^(\d+)\D/.exec(n.detail ?? "");
+        if (m) kept = Math.max(kept, Number(m[1]));
+      };
+      c.on("notice", onNotice);
       try {
         await c.query("SET lock_timeout = '2s'");
         await c.query("SET statement_timeout = '15min'");
-        await c.query(compile(sql`VACUUM (FULL, ANALYZE) ${sql.ident(t, VACUUMABLE)}`).text);
+        await c.query(compile(sql`VACUUM (FULL, VERBOSE) ${sql.ident(t, VACUUMABLE)}`).text);
+        if (kept > 0) left.push(t);
+        await c.query(compile(sql`ANALYZE ${sql.ident(t, VACUUMABLE)}`).text);
       } catch (e) {
-        left.push(t);
+        if (!left.includes(t)) left.push(t);
         if (pgCode(e) !== "55P03") console.error("[db] wipe:", t, e instanceof Error ? e.message : e);
       } finally {
+        c.off("notice", onNotice);
         await c.query("RESET lock_timeout; RESET statement_timeout").catch(() => {});
         c.release();
       }
@@ -358,6 +379,16 @@ export function wipe(tables: readonly WipeTable[]): Promise<void> {
       else await pool().query("DELETE FROM settings WHERE key = $1", [WIPE_KEY]);
     } catch (e) {
       console.error("[db] wipe list:", e instanceof Error ? e.message : e);
+    }
+    // not everything could be removed yet: try again soon, a few times, before the hourly job
+    const r = (gw.__wikiWipeRetry ??= { timer: null, attempt: 0 });
+    if (!left.length) r.attempt = 0;
+    else if (!r.timer && r.attempt < WIPE_RETRY_S.length) {
+      r.timer = setTimeout(() => {
+        r.timer = null;
+        void wipe([]);
+      }, WIPE_RETRY_S[r.attempt++] * 1000);
+      r.timer.unref?.();
     }
   };
   const next = (gw.__wikiWipe ?? Promise.resolve()).then(run, run);

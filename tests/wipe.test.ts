@@ -41,6 +41,33 @@ const stream = (b: Buffer) =>
       c.close();
     },
   });
+/**
+ * Waits until no wipe is outstanding. Something else in the database (here mostly PostgreSQL's
+ * own ANALYZE) can hold an older snapshot for a moment; then the wipe says "not yet" and has to
+ * run again — exactly what the app does on its own, just without waiting 30 s.
+ */
+async function settled() {
+  for (let i = 0; i < 100; i++) {
+    await wipe([]);
+    if (!(await pendingWipes()).length) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(`wipe never finished: ${JSON.stringify(await pendingWipes())}`);
+}
+
+const appClient = async () => {
+  const env = process.env;
+  const c = new pg.Client({
+    host: env.WIKI_DB_HOST,
+    port: Number(env.WIKI_DB_PORT),
+    user: env.WIKI_DB_USER,
+    password: env.WIKI_DB_PASSWORD,
+    database: env.WIKI_DB_NAME,
+  });
+  await c.connect();
+  return c;
+};
+
 const marker = (what: string) => `GONE-${what}-${Math.random().toString(36).slice(2, 10)}`;
 
 describe("deleting for good", () => {
@@ -69,7 +96,7 @@ describe("deleting for good", () => {
     expect((await dbFilesContain(short)).length).toBeGreaterThan(0); // in the trash: still there, on purpose
     const item = (await listTrash()).find((i) => i.slug === p.slug)!;
     await purgeTrashItem(item.id);
-    expect(await pendingWipes()).toEqual([]);
+    await settled();
     expect(await dbFilesContain(short)).toEqual([]);
     expect(await dbFilesContain(long)).toEqual([]);
   });
@@ -82,10 +109,12 @@ describe("deleting for good", () => {
     const pb = await createPage({ title: "Wipe alt", content: b, parentId: null, userId: uid });
     await trashPage(pa.slug, uid);
     await emptyTrash();
+    await settled();
     expect(await dbFilesContain(a)).toEqual([]);
     await trashPage(pb.slug, uid);
     await db().prepare("UPDATE trash SET deleted_at = deleted_at - 31 * 86400").run();
     expect(await purgeOldTrash()).toBe(1);
+    await settled();
     expect(await dbFilesContain(b)).toEqual([]);
   });
 
@@ -94,29 +123,44 @@ describe("deleting for good", () => {
     const id = await addUser(name, "editor");
     expect((await dbFilesContain(`${name}@example.com`)).length).toBeGreaterThan(0);
     await eraseUser(id, "self");
+    await settled();
     expect(await dbFilesContain(`${name}@example.com`)).toEqual([]);
   });
 
+  it("while an older snapshot could still see the rows, the wipe isn't counted as done", async () => {
+    const uid = await addUser("wipe-snap", "admin");
+    const m = marker("SNAPSHOT");
+    const pg1 = await createPage({ title: "Wipe Schnappschuss", content: m, parentId: null, userId: uid });
+    await settled();
+    // a long read elsewhere (like a backup in progress): it started before the deletion
+    const reader = await appClient();
+    try {
+      await reader.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await reader.query("SELECT 1");
+      await trashPage(pg1.slug, uid);
+      await emptyTrash();
+      expect(await pendingWipes()).toEqual(expect.arrayContaining(["pages", "page_revisions"]));
+      expect((await dbFilesContain(m)).length).toBeGreaterThan(0); // honestly not gone yet
+      await reader.query("COMMIT");
+    } finally {
+      await reader.end();
+    }
+    await settled(); // the retry (30 s later in the app) finishes the job
+    expect(await dbFilesContain(m)).toEqual([]);
+  });
+
   it("a table that is busy is wiped later (the list survives restarts), never forgotten", async () => {
-    const env = process.env;
-    const c = new pg.Client({
-      host: env.WIKI_DB_HOST,
-      port: Number(env.WIKI_DB_PORT),
-      user: env.WIKI_DB_USER,
-      password: env.WIKI_DB_PASSWORD,
-      database: env.WIKI_DB_NAME,
-    });
-    await c.connect();
+    await settled();
+    const c = await appClient();
     try {
       await c.query("BEGIN");
       await c.query("LOCK TABLE media IN ACCESS SHARE MODE"); // someone reading, for longer than 2 s
       const t0 = Date.now();
       await wipe(["media"]);
       expect(Date.now() - t0).toBeLessThan(10_000); // gave up waiting instead of blocking everyone
-      expect(await pendingWipes()).toEqual(["media"]);
+      expect(await pendingWipes()).toContain("media");
       await c.query("COMMIT");
-      await wipe([]); // the next run (or the hourly job) catches up
-      expect(await pendingWipes()).toEqual([]);
+      await settled(); // the next run (or the hourly job) catches up
     } finally {
       await c.end();
     }
@@ -138,6 +182,7 @@ describe("media: delete several, delete unused, and really gone", () => {
     expect(gone.map((m) => m.id).sort()).toEqual([a.id, b.id].sort());
     expect(existsSync(a.file) || existsSync(b.file)).toBe(false);
     expect((await listMedia()).some((m) => m.id === a.id || m.id === b.id)).toBe(false);
+    await settled();
     expect(await dbFilesContain(secretName)).toEqual([]);
   });
 
