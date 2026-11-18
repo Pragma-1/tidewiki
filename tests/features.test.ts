@@ -315,3 +315,19 @@ describe("GDPR", () => {
     await expect(eraseOwnAccount(asUser(owner), PW)).rejects.toThrow(/own this wiki/);
   });
 });
+
+describe("text selection is visible everywhere", () => {
+  it("the selection colour is its own, never the background of a block (warnings, marks, notes)", () => {
+    const css = readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf8");
+    const sel = /::selection\s*\{[^}]*background:\s*var\((--[\w-]+)\)/.exec(css)?.[1];
+    expect(sel).toBeDefined();
+    // every variable used as a background somewhere else
+    const used = new Set(
+      [...css.replace(/::selection\s*\{[^}]*\}/g, "").matchAll(/background(?:-color)?:\s*var\((--[\w-]+)\)/g)].map(
+        (m) => m[1],
+      ),
+    );
+    expect(used.has("--hl")).toBe(true); // the warning callout's background, the original bug
+    expect(used.has(sel!)).toBe(false);
+  });
+});

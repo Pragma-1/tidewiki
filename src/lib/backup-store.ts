@@ -1,13 +1,15 @@
 import {
   chmodSync,
+  constants as fsc,
   createReadStream,
   createWriteStream,
-  existsSync,
   fsyncSync,
   closeSync,
+  lstatSync,
   openSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -49,66 +51,204 @@ export interface BackupStore {
 
 /* ------------------------------------------------------------------ local */
 
-/** A folder: the default volume, or an SMB/NFS share mounted into the container. */
+/** File-system failures as messages an owner can act on; the details go to the server log. */
+function fsFailure(e: unknown): never {
+  if (e instanceof HttpError) throw e;
+  const code = (e as NodeJS.ErrnoException)?.code;
+  console.error("[backup] folder:", code ?? (e instanceof Error ? e.message : e));
+  if (code === "EACCES" || code === "EPERM")
+    throw new HttpError(
+      503,
+      "The wiki can’t write to the backup folder. It must belong to the user the wiki runs as (PUID/PGID).",
+    );
+  if (code === "EROFS") throw new HttpError(503, "The backup folder is read-only.");
+  if (code === "ENOSPC" || code === "EDQUOT") throw new HttpError(503, "The backup folder is full.");
+  if (code === "ELOOP")
+    throw new HttpError(503, "The backup folder contains a link that points elsewhere. It isn’t followed.");
+  throw new HttpError(503, "The backup folder can’t be used right now.");
+}
+
+/**
+ * A folder: the default volume, or a disk or SMB/NFS share mounted into the container.
+ *
+ * Nothing below the folder may be a symbolic link — whoever can write to a NAS share must not be
+ * able to make the wiki read, overwrite or delete a file elsewhere (or put its master key into a
+ * download) by planting a link. A folder the owner chose (`mustExist`) is never created: a share
+ * that isn't mounted must fail loudly, not quietly fill the container's own disk.
+ */
 export class LocalStore implements BackupStore {
   readonly kind = "local" as const;
-  constructor(readonly root: string) {}
+  constructor(
+    readonly root: string,
+    private readonly opts: { mustExist?: boolean } = {},
+  ) {}
   describe() {
     return this.root;
+  }
+  private ready(create: boolean) {
+    let st;
+    try {
+      st = statSync(this.root);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") fsFailure(e);
+      if (!create) return false;
+      if (this.opts.mustExist) throw new HttpError(503, "The backup folder doesn’t exist. Is the share mounted?");
+      try {
+        mkdirSync(this.root, { recursive: true, mode: 0o700 });
+      } catch (e2) {
+        fsFailure(e2);
+      }
+      return true;
+    }
+    if (!st.isDirectory()) throw new HttpError(503, "The backup folder doesn’t exist. Is the share mounted?");
+    return true;
   }
   private abs(key: string) {
     const p = path.resolve(/* turbopackIgnore: true */ this.root, checkKey(key));
     if (!p.startsWith(path.resolve(this.root) + path.sep)) throw new Error("path escapes the backup folder");
     return p;
   }
+  /** Every existing step from the folder down to `p` must be a real directory or file, never a link. */
+  private noLinks(p: string) {
+    const rel = path.relative(this.root, p).split(path.sep);
+    let cur = this.root;
+    for (const part of rel) {
+      cur = path.join(/* turbopackIgnore: true */ cur, part);
+      let st;
+      try {
+        st = lstatSync(cur);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        fsFailure(e);
+      }
+      if (st.isSymbolicLink()) fsFailure(Object.assign(new Error("link"), { code: "ELOOP" }));
+    }
+  }
   private ensure(dir: string) {
+    this.noLinks(dir);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     try {
       chmodSync(dir, 0o700);
     } catch {
       /* SMB/NFS may not support modes; the mount options decide there */
     }
+    this.noLinks(dir);
   }
   async put(key: string, file: string) {
+    this.ready(true);
     const dst = this.abs(key);
-    this.ensure(path.dirname(dst));
     const tmp = `${dst}.part-${randomBytes(6).toString("hex")}`;
     try {
-      await pipeline(createReadStream(file), createWriteStream(tmp, { mode: 0o600 }));
+      this.ensure(path.dirname(dst));
+      await pipeline(createReadStream(file), createWriteStream(tmp, { mode: 0o600, flags: "wx" }));
       const fd = openSync(tmp, "r");
       try {
         fsyncSync(fd); // on disk before it becomes visible
       } finally {
         closeSync(fd);
       }
-      renameSync(tmp, dst);
+      this.noLinks(dst);
+      renameSync(tmp, dst); // rename replaces a link itself, never what it points to
     } catch (e) {
       rmSync(tmp, { force: true });
-      throw e;
+      fsFailure(e);
     }
   }
   async get(key: string) {
     const p = this.abs(key);
-    if (!existsSync(p)) throw new HttpError(404, "Backup not found.");
-    return createReadStream(p);
+    if (!this.ready(false)) throw new HttpError(404, "Backup not found.");
+    this.noLinks(p);
+    let fd: number;
+    try {
+      fd = openSync(p, fsc.O_RDONLY | fsc.O_NOFOLLOW);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new HttpError(404, "Backup not found.");
+      fsFailure(e);
+    }
+    return createReadStream(p, { fd });
   }
   async exists(key: string) {
-    return existsSync(this.abs(key));
+    const p = this.abs(key);
+    if (!this.ready(false)) return false;
+    this.noLinks(p);
+    try {
+      return lstatSync(p).isFile();
+    } catch {
+      return false;
+    }
   }
   async list(prefix: "v2/" | "v2/objects/") {
+    if (!this.ready(false)) {
+      if (this.opts.mustExist) throw new HttpError(503, "The backup folder doesn’t exist. Is the share mounted?");
+      return [];
+    }
     const dir = path.join(/* turbopackIgnore: true */ this.root, prefix);
-    if (!existsSync(dir)) return [];
+    this.noLinks(dir);
     const out: { key: string; size: number }[] = [];
-    for (const f of readdirSync(dir, { withFileTypes: true })) {
-      if (!f.isFile()) continue;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      fsFailure(e);
+    }
+    for (const f of entries) {
+      if (!f.isFile()) continue; // links and folders are never listed
       const key = prefix + f.name;
-      if (KEY_RE.test(key)) out.push({ key, size: statSync(path.join(/* turbopackIgnore: true */ dir, f.name)).size });
+      if (KEY_RE.test(key)) out.push({ key, size: lstatSync(path.join(/* turbopackIgnore: true */ dir, f.name)).size });
     }
     return out;
   }
   async delete(key: string) {
-    rmSync(this.abs(key), { force: true });
+    const p = this.abs(key);
+    if (!this.ready(false)) return;
+    this.noLinks(path.dirname(p));
+    try {
+      rmSync(p, { force: true }); // a link would be removed itself, not its target
+    } catch (e) {
+      fsFailure(e);
+    }
   }
+}
+
+/** Folders that can never hold backups (the container's system, or what a restart wipes). */
+const SYSTEM_DIR = /^\/(?:bin|boot|dev|etc|lib|lib32|lib64|libx32|proc|root|run|sbin|sys|usr|var|tmp|app)(?:\/|$)/;
+const inside = (child: string, parent: string) =>
+  child === parent || child.startsWith(parent === "/" ? "/" : parent + "/");
+
+/**
+ * Checks a backup folder the owner typed in. It must be an absolute, plain path (no `..`, no
+ * odd characters), lie in one of the allowed roots (WIKI_BACKUP_ROOTS), stay clear of the wiki's
+ * own data and program folders, exist already, and contain no symbolic link on the way.
+ * Returns the cleaned path.
+ */
+export function checkLocalDir(input: unknown, o: { roots: string[]; avoid: string[] }): string {
+  if (typeof input !== "string")
+    throw new HttpError(400, "Enter the folder as an absolute path, such as /backups.", "dir");
+  let p = input.trim();
+  if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
+  if (
+    !p.startsWith("/") ||
+    p.length > 255 ||
+    !/^[A-Za-z0-9 ._/-]+$/.test(p) ||
+    path.posix.normalize(p) !== p ||
+    /(?:^|\/)\.{1,2}(?:\/|$)|\/\s|\s(?:\/|$)/.test(p)
+  )
+    throw new HttpError(400, "Enter the folder as an absolute path, such as /backups.", "dir");
+  // a system folder only when the operator listed a root there on purpose (WIKI_BACKUP_ROOTS)
+  if (p === "/" || !o.roots.some((r) => r !== "/" && inside(p, r) && (!SYSTEM_DIR.test(p) || SYSTEM_DIR.test(r))))
+    throw new HttpError(400, "This folder isn’t allowed. Choose one inside the folders listed below.", "dir");
+  if (o.avoid.some((a) => inside(p, a) || inside(a, p)))
+    throw new HttpError(400, "Backups can’t go into the wiki’s own data or program folder.", "dir");
+  let real: string;
+  try {
+    if (!statSync(p).isDirectory()) throw new Error("not a folder");
+    real = realpathSync(p);
+  } catch {
+    throw new HttpError(400, "This folder doesn’t exist in the container. Mount it in docker.yaml first.", "dir");
+  }
+  if (real !== p) throw new HttpError(400, "The path contains a link. Enter the real folder.", "dir");
+  return p;
 }
 
 /* --------------------------------------------------------------------- S3 */

@@ -910,15 +910,12 @@ export const DE: Record<string, string> = {
     "Eine heruntergeladene Sicherung enthält personenbezogene Daten und Passwort-Hashes. Bewahren Sie sie auf wie ein Passwort. Sicherungen älterer Versionen werden beim Wiederherstellen automatisch aktualisiert.",
   "A file in this backup clashes with a file of an existing backup. Refused.":
     "Eine Datei in dieser Sicherung kollidiert mit einer Datei einer vorhandenen Sicherung. Abgelehnt.",
-  "A full backup (all pages with history, trash, accounts, settings, files) at a fixed interval.":
-    "Eine vollständige Sicherung (alle Seiten mit Verlauf, Papierkorb, Konten, Einstellungen, Dateien) in festem Abstand.",
   "All pages in the trash and their histories are deleted for good. Backups made before keep them until they expire.":
     "Alle Seiten im Papierkorb werden samt Verlauf endgültig gelöscht. Vorher angelegte Sicherungen enthalten sie noch, bis diese ablaufen.",
   "Another import or backup is running. Try again in a moment.":
     "Gerade läuft ein anderer Import oder eine Sicherung. Bitte versuchen Sie es gleich noch einmal.",
   "Automatic backups": "Automatische Sicherungen",
   "Back to the trash": "Zurück zum Papierkorb",
-  "Back up automatically": "Automatisch sichern",
   "Back up now": "Jetzt sichern",
   "Backing up…": "Wird gesichert …",
   "Backup created": "Sicherung erstellt",
@@ -997,8 +994,6 @@ export const DE: Record<string, string> = {
     "Die Sicherung führt eine Datei eines Typs, den Tidewiki nicht ausliefert. Abgelehnt.",
   "The backup was restored and everyone was signed out. Sign in with the password from that time.":
     "Die Sicherung wurde wiederhergestellt und alle wurden abgemeldet. Melden Sie sich mit dem Passwort von damals an.",
-  "The backups are on the same volume as the wiki. If that disk fails, both are gone: set WIKI_BACKUP_DIR to a different disk or a network share, or download a backup now and then.":
-    "Die Sicherungen liegen auf demselben Datenträger wie das Wiki. Fällt er aus, ist beides weg: Setzen Sie WIKI_BACKUP_DIR auf eine andere Platte oder eine Netzwerkfreigabe, oder laden Sie ab und zu eine Sicherung herunter.",
   "The backup’s database is damaged.": "Die Datenbank der Sicherung ist beschädigt.",
   "The backup’s database is incomplete.": "Die Datenbank der Sicherung ist unvollständig.",
   "The trash is empty.": "Der Papierkorb ist leer.",
@@ -1087,8 +1082,6 @@ export const DE: Record<string, string> = {
   Folder: "Ordner",
   "Folder (local disk, NAS via SMB or NFS)": "Ordner (lokale Platte, NAS per SMB oder NFS)",
   "Folder in the bucket": "Ordner im Bucket",
-  "Folder in the container: {dir}. Which disk or share that is, is set in docker.yaml (WIKI_BACKUPS).":
-    "Ordner im Container: {dir}. Welche Platte oder Freigabe das ist, legt docker.yaml fest (WIKI_BACKUPS).",
   "Folder: letters, digits, dot, dash, underscore, ending with “/”.":
     "Ordner: Buchstaben, Ziffern, Punkt, Bindestrich, Unterstrich, endet mit „/“.",
   "Invalid access key.": "Ungültiger Zugriffsschlüssel.",
@@ -1130,8 +1123,6 @@ export const DE: Record<string, string> = {
   "The backup storage can’t be read right now.": "Der Sicherungsspeicher kann gerade nicht gelesen werden.",
   "The backup storage returned different data.": "Der Sicherungsspeicher hat andere Daten zurückgegeben.",
   "The backup storage works ({where}).": "Der Sicherungsspeicher funktioniert ({where}).",
-  "The backups are on the same volume as the wiki. If that disk fails, both are gone: point WIKI_BACKUPS at another disk or a NAS share, or use S3.":
-    "Die Sicherungen liegen auf demselben Datenträger wie das Wiki. Fällt er aus, ist beides weg: Richten Sie WIKI_BACKUPS auf eine andere Platte oder eine NAS-Freigabe, oder nutzen Sie S3.",
   "The database is not reachable right now.": "Die Datenbank ist gerade nicht erreichbar.",
   "The page is identical to the version in the backup.": "Die Seite ist identisch mit der Fassung in der Sicherung.",
   "The page no longer exists. It is recreated with its whole history from the backup.":
@@ -1172,4 +1163,138 @@ export const DE: Record<string, string> = {
   "Backup account restored": "Konto aus Sicherung wiederhergestellt",
   "This person deleted their account themselves (right to erasure). It can't be restored.":
     "Diese Person hat ihr Konto selbst gelöscht (Recht auf Löschung). Es kann nicht wiederhergestellt werden.",
+  "Backup settings": "Sicherungen – Einstellungen",
+  "Make backups": "Sicherungen erstellen",
+  "On: a full backup (all pages with history, trash, accounts, settings, files) at a fixed interval, and “Back up now”. Off: no new backups; existing ones stay and can still be restored.":
+    "An: eine vollständige Sicherung (alle Seiten mit Verlauf, Papierkorb, Konten, Einstellungen, Dateien) in festem Abstand, dazu „Jetzt sichern“. Aus: keine neuen Sicherungen; vorhandene bleiben und lassen sich weiter wiederherstellen.",
+  "Backups are switched off.": "Sicherungen sind ausgeschaltet.",
+  "Backups are switched off: no new backups are made, neither automatically nor by hand. The backups below stay and can still be opened and restored.":
+    "Sicherungen sind ausgeschaltet: Es entstehen keine neuen Sicherungen, weder automatisch noch von Hand. Die Sicherungen unten bleiben und lassen sich weiter öffnen und wiederherstellen.",
+  "Backups are switched off. The owner can switch them on above.":
+    "Sicherungen sind ausgeschaltet. Der Inhaber kann sie oben einschalten.",
+  "Empty: the default folder {dir}. Another folder must lie inside {roots}, already exist and belong to the user the wiki runs as — a disk or NAS share is mounted there in docker.yaml.":
+    "Leer: der Standardordner {dir}. Ein anderer Ordner muss innerhalb von {roots} liegen, bereits existieren und dem Benutzer gehören, unter dem das Wiki läuft – eine Platte oder NAS-Freigabe wird dort in docker.yaml eingebunden.",
+  "The backups are on the same volume as the wiki. If that disk fails, both are gone: choose a folder on another disk or a NAS share, or use S3.":
+    "Die Sicherungen liegen auf demselben Datenträger wie das Wiki. Fällt er aus, ist beides weg: Wählen Sie einen Ordner auf einer anderen Platte oder einer NAS-Freigabe, oder nutzen Sie S3.",
+  "Existing backups stay where they are and show up again when you switch back.":
+    "Vorhandene Sicherungen bleiben, wo sie sind, und erscheinen wieder, wenn Sie zurückwechseln.",
+  "The wiki can’t write to the backup folder. It must belong to the user the wiki runs as (PUID/PGID).":
+    "Das Wiki kann nicht in den Sicherungsordner schreiben. Er muss dem Benutzer gehören, unter dem das Wiki läuft (PUID/PGID).",
+  "The backup folder is read-only.": "Der Sicherungsordner ist schreibgeschützt.",
+  "The backup folder is full.": "Der Sicherungsordner ist voll.",
+  "The backup folder contains a link that points elsewhere. It isn’t followed.":
+    "Im Sicherungsordner liegt eine Verknüpfung, die woandershin zeigt. Ihr wird nicht gefolgt.",
+  "The backup folder can’t be used right now.": "Der Sicherungsordner ist gerade nicht nutzbar.",
+  "The backup folder doesn’t exist. Is the share mounted?":
+    "Den Sicherungsordner gibt es nicht. Ist die Freigabe eingebunden?",
+  "Enter the folder as an absolute path, such as /backups.":
+    "Geben Sie den Ordner als absoluten Pfad an, etwa /backups.",
+  "This folder isn’t allowed. Choose one inside the folders listed below.":
+    "Dieser Ordner ist nicht erlaubt. Wählen Sie einen innerhalb der unten genannten Ordner.",
+  "Backups can’t go into the wiki’s own data or program folder.":
+    "Sicherungen dürfen nicht in den Daten- oder Programmordner des Wikis.",
+  "This folder doesn’t exist in the container. Mount it in docker.yaml first.":
+    "Diesen Ordner gibt es im Container nicht. Binden Sie ihn zuerst in docker.yaml ein.",
+  "The path contains a link. Enter the real folder.":
+    "Der Pfad enthält eine Verknüpfung. Geben Sie den echten Ordner an.",
+  "Select at least one page.": "Wählen Sie mindestens eine Seite aus.",
+  "Select at most 500 pages at once.": "Wählen Sie höchstens 500 Seiten auf einmal aus.",
+  "Invalid page.": "Ungültige Seite.",
+  "Manage pages": "Seiten verwalten",
+  "Select pages to delete several at once. Deleted pages wait in the trash for 30 days.":
+    "Wählen Sie Seiten aus, um mehrere auf einmal zu löschen. Gelöschte Seiten warten 30 Tage im Papierkorb.",
+  "Open the trash": "Zum Papierkorb",
+  "Top level (main page)": "Oberste Ebene (Hauptseite)",
+  "Move “{title}”": "„{title}“ verschieben",
+  "New chapter": "Neues Kapitel",
+  "From this import": "Aus diesem Import",
+  "Existing pages in the wiki": "Bestehende Seiten im Wiki",
+  "Sub-pages move along. Only chapters with room for them are listed.":
+    "Unterseiten wandern mit. Aufgeführt sind nur Kapitel, unter die sie noch passen.",
+  Move: "Verschieben",
+  "kept as it is": "bleibt unverändert",
+  "Import “{title}”": "„{title}“ importieren",
+  "Title of {path}": "Titel von {path}",
+  "left out — its sub-pages move up a level": "ausgelassen – die Unterseiten rücken eine Ebene höher",
+  "nested too deeply": "zu tief verschachtelt",
+  "left out": "ausgelassen",
+  "Arrange “{title}”": "„{title}“ anordnen",
+  "The existing page is kept and stays where it is.": "Die bestehende Seite bleibt erhalten und dort, wo sie ist.",
+  stays: "bleibt",
+  Up: "Nach oben",
+  Down: "Nach unten",
+  "One level up (main page)": "Eine Ebene höher (Hauptseite)",
+  "Sub-page of the page above": "Unterseite der Seite darüber",
+  "Move to another chapter": "In ein anderes Kapitel verschieben",
+  "Preview and arrange": "Vorschau und anordnen",
+  "Arrange the import": "Import anordnen",
+  Reset: "Zurücksetzen",
+  "Change the order, make pages main pages or sub-pages, move them under an existing page, rename them or leave them out. Chapters can be nested {n} levels deep.":
+    "Ändern Sie die Reihenfolge, machen Sie Seiten zu Haupt- oder Unterseiten, hängen Sie sie unter eine bestehende Seite, benennen Sie sie um oder lassen Sie sie aus. Kapitel lassen sich {n} Ebenen tief verschachteln.",
+  "Pages of the import": "Seiten des Imports",
+  "Under the existing page “{title}”": "Unter der bestehenden Seite „{title}“",
+  "{n} pages are nested deeper than {max} levels. Move them up before importing.":
+    "{n} Seiten sind tiefer als {max} Ebenen verschachtelt. Rücken Sie sie vor dem Import höher.",
+  "Import {n} pages now": "{n} Seiten jetzt importieren",
+  "Move {n} pages to the trash?": "{n} Seiten in den Papierkorb verschieben?",
+  "… and {n} more": "… und {n} weitere",
+  "They stay in the trash with their whole history for 30 days and can be restored from there.":
+    "Sie bleiben mit ihrem ganzen Verlauf 30 Tage im Papierkorb und lassen sich von dort wiederherstellen.",
+  "{n} sub-pages that aren’t selected move to the top level.":
+    "{n} nicht ausgewählte Unterseiten rücken auf die oberste Ebene.",
+  "{n} pages moved to the trash.": "{n} Seiten in den Papierkorb verschoben.",
+  "{n} were already gone.": "{n} waren schon gelöscht.",
+  Selection: "Auswahl",
+  "Filter pages": "Seiten filtern",
+  "{n} selected": "{n} ausgewählt",
+  "Nothing selected": "Nichts ausgewählt",
+  "Clear selection": "Auswahl aufheben",
+  "Delete selected": "Ausgewählte löschen",
+  "Select all shown pages": "Alle angezeigten Seiten auswählen",
+  "Created by": "Erstellt von",
+  "Last change": "Letzte Änderung",
+  "Select “{title}”": "„{title}“ auswählen",
+  "{n} sub-pages": "{n} Unterseiten",
+  "No page matches the filter.": "Keine Seite passt zum Filter.",
+  "You can delete the pages you created; administrators can delete any page.":
+    "Sie können die Seiten löschen, die Sie angelegt haben; Administratoren können jede Seite löschen.",
+  "Tip: Shift-click selects a range. Ticking a chapter ticks its sub-pages too.":
+    "Tipp: Mit Umschalt-Klick wählen Sie einen Bereich. Ein angehaktes Kapitel hakt seine Unterseiten mit an.",
+  "This preview has expired. Check the file again.": "Diese Vorschau ist abgelaufen. Prüfen Sie die Datei erneut.",
+  "You can only delete pages you created. Nothing was deleted.":
+    "Sie können nur Seiten löschen, die Sie angelegt haben. Es wurde nichts gelöscht.",
+  "Delete all unused files?": "Alle unbenutzten Dateien löschen?",
+  "Delete unused ({n}, {size})": "Unbenutzte löschen ({n}, {size})",
+  "Delete unused files": "Unbenutzte Dateien löschen",
+  "Delete {n} files permanently?": "{n} Dateien endgültig löschen?",
+  "Deletes every file that no page and no page in the trash shows.":
+    "Löscht jede Datei, die keine Seite und keine Seite im Papierkorb zeigt.",
+  "Frees {size}.": "Gibt {size} frei.",
+  "Invalid file.": "Ungültige Datei.",
+  "No unused files": "Keine unbenutzten Dateien",
+  "No unused files.": "Keine unbenutzten Dateien.",
+  "Privacy notice elsewhere": "Datenschutzerklärung an anderer Stelle",
+  "Required as soon as the wiki processes personal data — accounts, e-mail addresses, IP addresses in the log (Art. 13 GDPR). Only switch it off if your privacy notice is published elsewhere, for example on your main website, and enter its address below.":
+    "Pflicht, sobald das Wiki personenbezogene Daten verarbeitet – Konten, E-Mail-Adressen, IP-Adressen im Protokoll (Art. 13 DSGVO). Schalten Sie sie nur aus, wenn Ihre Datenschutzerklärung an anderer Stelle steht, etwa auf Ihrer Hauptwebsite, und tragen Sie deren Adresse unten ein.",
+  "Select all shown files": "Alle angezeigten Dateien auswählen",
+  "Select at least one file.": "Wählen Sie mindestens eine Datei aus.",
+  "Select at most 1000 files at once.": "Wählen Sie höchstens 1000 Dateien auf einmal aus.",
+  "Stray files on the disk without an entry (left behind by a crash) are removed too.":
+    "Verwaiste Dateien auf der Platte ohne Eintrag (nach einem Absturz liegen geblieben) werden ebenfalls entfernt.",
+  "The files are deleted for good: from the disk and from the database. Only backups made before keep a copy, until they are rotated out.":
+    "Die Dateien werden endgültig gelöscht: von der Platte und aus der Datenbank. Nur vorher erstellte Sicherungen behalten eine Kopie, bis sie aussortiert werden.",
+  "Tip: Shift-click selects a range.": "Tipp: Mit Umschalt-Klick wählen Sie einen Bereich.",
+  "https address of your privacy notice. The footer, the sign-up form and the other legal pages link there. Empty: no link at all.":
+    "https-Adresse Ihrer Datenschutzerklärung. Fußzeile, Registrierung und die übrigen Rechtstexte verlinken dorthin. Leer: kein Link.",
+  "only in old versions": "nur in alten Versionen",
+  "only in the trash": "nur im Papierkorb",
+  "{n} appear only in older versions of pages; those versions will miss them.":
+    "{n} kommen nur in älteren Versionen von Seiten vor; dort fehlen sie dann.",
+  "{n} are shown on deleted pages in the trash; restored, those pages would miss them.":
+    "{n} werden auf gelöschten Seiten im Papierkorb gezeigt; nach einer Wiederherstellung fehlen sie dort.",
+  "{n} files deleted, {size} freed.": "{n} Dateien gelöscht, {size} freigegeben.",
+  "{n} files that no page and no page in the trash shows ({size}).":
+    "{n} Dateien, die keine Seite und keine Seite im Papierkorb zeigt ({size}).",
+  "{n} of them are still shown on pages; there they will appear as missing.":
+    "{n} davon werden noch auf Seiten gezeigt; dort fehlen sie dann.",
 };

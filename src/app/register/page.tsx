@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { Shell } from "@/components/shell";
 import { RegisterForm } from "@/components/auth-forms";
 import { gate } from "@/lib/guard";
-import { getSettings } from "@/lib/settings";
+import { getSettings, privacyHref } from "@/lib/settings";
 import { getT } from "@/lib/i18n-server";
 import { policyFromSettings } from "@/lib/password-policy";
 export const dynamic = "force-dynamic";
@@ -26,7 +26,11 @@ export default async function Register() {
     );
   return (
     <Shell live={false}>
-      <RegisterForm policy={policyFromSettings(cfg)} termsEnabled={cfg.legal_terms_enabled} />
+      <RegisterForm
+        policy={policyFromSettings(cfg)}
+        termsEnabled={cfg.legal_terms_enabled}
+        privacyHref={privacyHref(cfg)}
+      />
     </Shell>
   );
 }

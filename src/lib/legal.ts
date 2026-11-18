@@ -11,12 +11,15 @@ export const isLegalKey = (k: unknown): k is LegalKey =>
   typeof k === "string" && (LEGAL_KEYS as readonly string[]).includes(k);
 
 /** The privacy notice is always published; terms and imprint can be switched off (e.g. for a private wiki). */
-export const isLegalEnabled = (
-  key: LegalKey,
-  cfg: Pick<Settings, "legal_terms_enabled" | "legal_imprint_enabled">,
-): boolean => (key === "terms" ? cfg.legal_terms_enabled : key === "imprint" ? cfg.legal_imprint_enabled : true);
-export const enabledLegalKeys = (cfg: Pick<Settings, "legal_terms_enabled" | "legal_imprint_enabled">) =>
-  LEGAL_KEYS.filter((k) => isLegalEnabled(k, cfg));
+type LegalSwitches = Pick<
+  Settings,
+  "legal_terms_enabled" | "legal_imprint_enabled" | "legal_privacy_enabled" | "legal_privacy_url"
+>;
+export const isLegalEnabled = (key: LegalKey, cfg: LegalSwitches): boolean =>
+  key === "terms" ? cfg.legal_terms_enabled : key === "imprint" ? cfg.legal_imprint_enabled : cfg.legal_privacy_enabled;
+export const enabledLegalKeys = (cfg: LegalSwitches) => LEGAL_KEYS.filter((k) => isLegalEnabled(k, cfg));
+import { privacyHref } from "./settings";
+export { privacyHref };
 
 /** Date the built-in templates were last revised (shown as "Stand"). */
 const TEMPLATE_DATE = { de: "November 2026", en: "November 2026" };
@@ -37,6 +40,12 @@ const lines = (s: string) =>
     .join("  \n");
 
 type Ctx = { cfg: Settings; lang: Lang; mail: boolean; ipKnown: boolean; cloudflare: boolean };
+
+/** A section pointing to the privacy notice, or nothing when there is none to point to. */
+function privacySection(c: Ctx, textWithLinkLabel: string, without = ""): string {
+  const href = privacyHref(c.cfg);
+  return href ? `${textWithLinkLabel}(${href}).` : without;
+}
 
 function operatorBlock({ cfg, lang }: Ctx): string {
   const missing = lang === "de" ? "[Bitte in den Einstellungen ergänzen]" : "[Please add in Settings]";
@@ -301,9 +310,7 @@ Das Wiki wird ohne Gewähr für ständige Verfügbarkeit, Vollständigkeit oder 
 
 Der Betreiber haftet unbeschränkt bei Vorsatz und grober Fahrlässigkeit, bei Verletzung von Leben, Körper oder Gesundheit sowie nach dem Produkthaftungsgesetz. Bei einfacher Fahrlässigkeit haftet er nur bei Verletzung einer wesentlichen Pflicht, deren Erfüllung die ordnungsgemäße Nutzung erst ermöglicht, und begrenzt auf den vorhersehbaren, typischen Schaden. Für Inhalte, die Nutzende einstellen, ist der Betreiber nach Maßgabe der gesetzlichen Vorschriften erst ab Kenntnis verantwortlich.
 
-## 8. Datenschutz
-
-Wie Ihre Daten verarbeitet werden, steht in der [Datenschutzerklärung](/privacy).
+${privacySection(c, "## 8. Datenschutz\n\nWie Ihre Daten verarbeitet werden, steht in der [Datenschutzerklärung]", "## 8. Datenschutz\n\nWie Ihre Daten verarbeitet werden, erfahren Sie beim Betreiber.")}
 
 ## 9. Änderungen
 
@@ -352,9 +359,7 @@ The wiki is provided without any guarantee of constant availability or of comple
 
 The operator is fully liable for intent and gross negligence, for injury to life, body or health and under the Product Liability Act. For simple negligence, the operator is only liable for breach of an essential obligation that makes proper use possible in the first place, limited to the foreseeable, typical damage. For content posted by users, the operator is responsible in accordance with the law only from the time it becomes aware of it.
 
-## 8. Privacy
-
-How your data is processed is described in the [privacy notice](/privacy).
+${privacySection(c, "## 8. Privacy\n\nHow your data is processed is described in the [privacy notice]", "## 8. Privacy\n\nThe operator can tell you how your data is processed.")}
 
 ## 9. Changes
 
@@ -376,9 +381,7 @@ const imprintDe = (c: Ctx) => `# Impressum
 
 ${operatorBlock(c)}
 ${c.cfg.imprint_extra ? `\n${lines(c.cfg.imprint_extra)}\n` : ""}
-## Datenschutz
-
-Informationen zur Verarbeitung personenbezogener Daten finden Sie in der [Datenschutzerklärung](/privacy).`;
+${privacySection(c, "## Datenschutz\n\nInformationen zur Verarbeitung personenbezogener Daten finden Sie in der [Datenschutzerklärung]")}`;
 
 const imprintEn = (c: Ctx) => `# Imprint
 
@@ -386,9 +389,7 @@ const imprintEn = (c: Ctx) => `# Imprint
 
 ${operatorBlock(c)}
 ${c.cfg.imprint_extra ? `\n${lines(c.cfg.imprint_extra)}\n` : ""}
-## Privacy
-
-Information on how personal data is processed is in the [privacy notice](/privacy).`;
+${privacySection(c, "## Privacy\n\nInformation on how personal data is processed is in the [privacy notice]")}`;
 
 const TEMPLATES: Record<LegalKey, Record<Lang, (c: Ctx) => string>> = {
   privacy: { de: privacyDe, en: privacyEn },

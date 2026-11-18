@@ -5,7 +5,7 @@ type Def =
   | { type: "int"; default: number; min: number; max: number }
   | { type: "enum"; default: string; values: readonly string[] }
   | { type: "string"; default: string; max: number }
-  | { type: "text"; default: string; max: number; multiline?: boolean; email?: boolean };
+  | { type: "text"; default: string; max: number; multiline?: boolean; email?: boolean; url?: boolean };
 
 export const SETTING_DEFS = {
   site_name: { type: "string", default: "Tidewiki", max: 60 },
@@ -38,11 +38,16 @@ export const SETTING_DEFS = {
   // legal pages: the privacy notice is always on; terms and imprint can be switched off (e.g. a private wiki)
   legal_terms_enabled: { type: "bool", default: true },
   legal_imprint_enabled: { type: "bool", default: true },
+  legal_privacy_enabled: { type: "bool", default: true },
+  // where the privacy notice is when it isn't published here (e.g. on the operator's main site)
+  legal_privacy_url: { type: "text", default: "", max: 300, url: true },
   // backups
   backup_enabled: { type: "bool", default: true },
   backup_interval_hours: { type: "int", default: 24, min: 1, max: 168 },
   backup_keep: { type: "int", default: 14, min: 1, max: 100 },
   backup_target: { type: "enum", default: "local", values: ["local", "s3"] },
+  // folder inside the container for the "local" target; empty = WIKI_BACKUP_DIR (checked in backup.ts)
+  backup_local_dir: { type: "text", default: "", max: 255 },
   backup_s3_endpoint: { type: "text", default: "", max: 300 },
   backup_s3_region: { type: "text", default: "us-east-1", max: 40 },
   backup_s3_bucket: { type: "text", default: "", max: 63 },
@@ -87,10 +92,13 @@ export type Settings = {
   external_media_autoload: boolean;
   legal_terms_enabled: boolean;
   legal_imprint_enabled: boolean;
+  legal_privacy_enabled: boolean;
+  legal_privacy_url: string;
   backup_enabled: boolean;
   backup_interval_hours: number;
   backup_keep: number;
   backup_target: "local" | "s3";
+  backup_local_dir: string;
   backup_s3_endpoint: string;
   backup_s3_region: string;
   backup_s3_bucket: string;
@@ -135,9 +143,43 @@ export function coerce(def: Def, v: unknown): string | number | boolean | null {
       if (t.length > def.max) return null;
       if ((def.multiline ? /[\u0000-\u0009\u000b-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/).test(t)) return null;
       if (def.email && t && !/^[^\s@<>"'`\\,;:()[\]]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(t)) return null;
+      if (def.url && t) return httpsUrl(t);
       return t;
     }
   }
+}
+
+/**
+ * Where links to the privacy notice go: the page here, the operator's own address when it's
+ * published elsewhere, or nowhere (then the links are left out).
+ */
+export const privacyHref = (cfg: Pick<Settings, "legal_privacy_enabled" | "legal_privacy_url">): string | null =>
+  cfg.legal_privacy_enabled ? "/privacy" : cfg.legal_privacy_url || null;
+
+/** What page rendering takes from the settings. */
+export const renderSettings = (cfg: Settings) => ({
+  autoloadExternal: cfg.external_media_autoload,
+  privacyHref: privacyHref(cfg),
+});
+
+/** An https address that's safe to put in a link: no credentials, no spaces, a real host. */
+function httpsUrl(t: string): string | null {
+  if (/\s/.test(t)) return null;
+  let u: URL;
+  try {
+    u = new URL(t);
+  } catch {
+    return null;
+  }
+  if (
+    u.protocol !== "https:" ||
+    u.username ||
+    u.password ||
+    !/^[a-z0-9.-]+$/i.test(u.hostname) ||
+    !u.hostname.includes(".")
+  )
+    return null;
+  return u.href.length <= 300 ? u.href : null;
 }
 
 export async function getSettings(): Promise<Settings> {

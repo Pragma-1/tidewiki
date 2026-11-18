@@ -145,7 +145,16 @@ export function LoginForm({ next, canRegister, canReset }: { next?: string; canR
   );
 }
 
-export function RegisterForm({ policy, termsEnabled = true }: { policy: PasswordPolicy; termsEnabled?: boolean }) {
+export function RegisterForm({
+  policy,
+  termsEnabled = true,
+  privacyHref = "/privacy",
+}: {
+  policy: PasswordPolicy;
+  termsEnabled?: boolean;
+  /** null: no privacy notice to link to */
+  privacyHref?: string | null;
+}) {
   const t = useT();
   const router = useRouter();
   const s = useSubmit();
@@ -220,11 +229,15 @@ export function RegisterForm({ policy, termsEnabled = true }: { policy: Password
             .{" "}
           </>
         )}
-        {t("How we handle your data:")}{" "}
-        <Link href="/privacy" target="_blank">
-          {t("privacy notice")}
-        </Link>
-        .
+        {privacyHref && (
+          <>
+            {t("How we handle your data:")}{" "}
+            <a href={privacyHref} target="_blank" rel="noopener noreferrer">
+              {t("privacy notice")}
+            </a>
+            .
+          </>
+        )}
       </p>
       <button className="btn block" disabled={s.busy}>
         {s.busy ? t("Creating…") : t("Create account")}

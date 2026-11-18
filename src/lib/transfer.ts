@@ -11,6 +11,7 @@ import {
   readFileSync,
   statSync,
   existsSync,
+  readdirSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
@@ -163,12 +164,29 @@ export const IMPORT_LIMITS = {
 };
 export type Conflict = "skip" | "overwrite" | "copy";
 export type PlanItem = {
+  /** stable id of the page inside this archive (folder path without extension) */
+  key: string;
   path: string;
   title: string;
   slug: string;
+  /** chapter title, for display */
   parent: string | null;
+  /** chapter inside the archive, or null (top level or an existing page, see parentPage) */
+  parentKey: string | null;
+  /** an existing wiki page the page goes under */
+  parentPage: number | null;
   action: "create" | "overwrite" | "skip" | "copy";
+  /** a page with this address exists already (its level, 1 = top) */
+  exists: boolean;
+  existingDepth: number | null;
 };
+
+/**
+ * How the person arranged the preview: every page of the archive exactly once, in the order
+ * wanted. parent = null (top level), the key of another page in the archive, or "page:<id>" for
+ * an existing wiki page. include = false leaves the page out (its sub-pages move up a level).
+ */
+export type LayoutItem = { key: string; parent: string | null; title?: string; include: boolean };
 export type ImportResult = {
   pages: PlanItem[];
   media: number;
@@ -177,9 +195,71 @@ export type ImportResult = {
   created: number;
   updated: number;
   skipped: number;
+  /** pages left out in the arrangement */
+  excluded: number;
 };
 
 const IMPORT_DIR = () => path.join(/* turbopackIgnore: true */ MEDIA_DIR(), ".import");
+
+/* ------------------------------------------------------------ staged uploads */
+
+/**
+ * A previewed upload waits here so the import can be applied with the arrangement made in the
+ * preview, without sending the file again. Bound to the person who uploaded it, one per person,
+ * gone after an hour, after it was imported, or when the server restarts. Kept on globalThis so
+ * every route of the server sees the same list.
+ */
+type Staged = { userId: number; file: string; name: string; expires: number };
+const STAGE_TTL_MS = 60 * 60 * 1000;
+const gs = globalThis as unknown as { __wikiStaged?: Map<string, Staged>; __wikiStagedSwept?: boolean };
+const stagedMap = () => (gs.__wikiStaged ??= new Map());
+const STAGE_TOKEN = /^[A-Za-z0-9_-]{32}$/;
+
+function sweepStaged() {
+  const m = stagedMap();
+  for (const [t, v] of m) if (v.expires < Date.now()) dropStaged(t);
+  if (!gs.__wikiStagedSwept) {
+    // leftovers of an earlier run of the server can never be applied: remove them
+    gs.__wikiStagedSwept = true;
+    const known = new Set([...m.values()].map((v) => path.basename(v.file)));
+    try {
+      for (const f of readdirSync(IMPORT_DIR()))
+        if (f.startsWith("staged-") && !known.has(f))
+          rmSync(path.join(/* turbopackIgnore: true */ IMPORT_DIR(), f), { force: true });
+    } catch {
+      /* no folder yet */
+    }
+  }
+}
+
+/** Keeps an uploaded file for applying later; returns the token. The person's older preview is dropped. */
+export function stageUpload(file: string, userId: number, name: string): string {
+  sweepStaged();
+  const m = stagedMap();
+  for (const [t, v] of m) if (v.userId === userId) dropStaged(t);
+  const token = randomBytes(24).toString("base64url");
+  const dest = path.join(/* turbopackIgnore: true */ IMPORT_DIR(), `staged-${randomBytes(12).toString("hex")}`);
+  renameSync(file, dest);
+  m.set(token, { userId, file: dest, name, expires: Date.now() + STAGE_TTL_MS });
+  return token;
+}
+
+/** The staged file for this token — only for the person who uploaded it. */
+export function stagedUpload(token: unknown, userId: number): { file: string; name: string } {
+  sweepStaged();
+  const v = typeof token === "string" && STAGE_TOKEN.test(token) ? stagedMap().get(token) : undefined;
+  if (!v || v.userId !== userId || !existsSync(v.file))
+    throw new HttpError(410, "This preview has expired. Check the file again.");
+  return { file: v.file, name: v.name };
+}
+
+export function dropStaged(token: string) {
+  const m = stagedMap();
+  const v = m.get(token);
+  if (!v) return;
+  m.delete(token);
+  rmSync(v.file, { force: true });
+}
 
 /** Streams the request body into a temp file with a hard cap. */
 export async function receiveUpload(
@@ -369,13 +449,139 @@ function decodeText(b: Buffer, name: string, warnings: string[]): string | null 
   return s;
 }
 
+/** A page of the archive while the import is planned. */
+type Node = {
+  key: string;
+  title: string;
+  slug: string;
+  content: string;
+  parentKey: string | null;
+  parentPage: number | null;
+  depth: number;
+  path: string;
+};
+
+const LAYOUT_BAD = "The arrangement doesn’t match the file. Check the file again.";
+
+/**
+ * Checks the arrangement the person made in the preview and turns it into the creation order
+ * (parents before their sub-pages, siblings in the chosen order). Everything coming from the
+ * browser is checked: every page exactly once, chapters only pages of this archive or existing
+ * wiki pages, no loops, the nesting limit kept. Pages left out hand their sub-pages to their
+ * own chapter. Pages that are kept as they are (an existing page, "skip") stay where they are
+ * in the wiki, so their depth there counts.
+ */
+async function arrange(
+  nodes: Map<string, Node>,
+  layout: unknown,
+  actionOf: Map<string, PlanItem["action"]>,
+  existsFor: Map<string, boolean>,
+  existing: Map<string, { id: number; depth: number }>,
+): Promise<{ ordered: Node[]; pageTitles: Map<number, string> }> {
+  if (!Array.isArray(layout) || layout.length !== nodes.size) throw new HttpError(400, LAYOUT_BAD);
+  type It = { node: Node; parentKey: string | null; parentPage: number | null; include: boolean; index: number };
+  const items = new Map<string, It>();
+  layout.forEach((raw: unknown, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new HttpError(400, LAYOUT_BAD);
+    const { key, parent, title, include } = raw as Record<string, unknown>;
+    if (typeof key !== "string" || !nodes.has(key) || items.has(key) || typeof include !== "boolean")
+      throw new HttpError(400, LAYOUT_BAD);
+    let parentKey: string | null = null;
+    let parentPage: number | null = null;
+    if (parent === null) {
+      /* top level */
+    } else if (typeof parent === "string" && /^page:[1-9]\d{0,15}$/.test(parent)) {
+      parentPage = Number(parent.slice(5));
+      if (!Number.isSafeInteger(parentPage)) throw new HttpError(400, LAYOUT_BAD);
+    } else if (typeof parent === "string" && parent !== key && nodes.has(parent)) parentKey = parent;
+    else throw new HttpError(400, LAYOUT_BAD);
+    const node = nodes.get(key)!;
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.length > 1000) throw new HttpError(400, LAYOUT_BAD);
+      const t = cleanTitle(title);
+      if (t) node.title = t;
+    }
+    items.set(key, { node, parentKey, parentPage, include, index });
+  });
+
+  // no loops: following the chapters upwards must end at the top or at an existing page
+  for (const it of items.values()) {
+    const seen = new Set<string>([it.node.key]);
+    for (let k = it.parentKey; k; k = items.get(k)!.parentKey) {
+      if (seen.has(k)) throw new HttpError(400, "A page can’t be moved inside itself.");
+      seen.add(k);
+    }
+  }
+  // left-out chapters hand their sub-pages up
+  for (const it of items.values()) {
+    while (it.parentKey && !items.get(it.parentKey)!.include) {
+      const up = items.get(it.parentKey)!;
+      it.parentKey = up.parentKey;
+      it.parentPage = up.parentPage;
+    }
+    if (it.parentKey) it.parentPage = null;
+  }
+  const kept = [...items.values()].filter((it) => it.include);
+
+  // existing pages used as chapters must exist; their level decides how deep the import may go
+  const pageIds = [...new Set(kept.map((it) => it.parentPage).filter((x): x is number => x !== null))];
+  const pages = new Map<number, { title: string; depth: number }>();
+  if (pageIds.length) {
+    for (const r of await all<{ id: number; title: string; depth: number }>(
+      sql`WITH RECURSIVE up(id, cur, d) AS (
+            SELECT id, parent_id, 1 FROM pages WHERE id = ANY(${pageIds}::bigint[])
+            UNION ALL SELECT up.id, p.parent_id, up.d + 1 FROM up JOIN pages p ON p.id = up.cur WHERE up.d < 50
+          )
+          SELECT p.id, p.title, MAX(up.d) AS depth FROM up JOIN pages p ON p.id = up.id GROUP BY p.id, p.title`,
+    ))
+      pages.set(r.id, { title: r.title, depth: r.depth });
+    if (pageIds.some((id) => !pages.has(id)))
+      throw new HttpError(400, "The selected chapter does not exist.", "parentId");
+  }
+  const depth = new Map<string, number>();
+  const depthOfItem = (it: It): number => {
+    const known = depth.get(it.node.key);
+    if (known !== undefined) return known;
+    const stays = actionOf.get(it.node.key) === "skip" && existsFor.get(it.node.key);
+    const d = stays
+      ? existing.get(it.node.slug)!.depth
+      : (it.parentPage ? pages.get(it.parentPage)!.depth : it.parentKey ? depthOfItem(items.get(it.parentKey)!) : 0) +
+        1;
+    depth.set(it.node.key, d);
+    return d;
+  };
+  for (const it of kept)
+    if (depthOfItem(it) > APP.maxPageDepth)
+      throw new HttpError(400, `Chapters can be nested ${APP.maxPageDepth} levels deep at most.`, "parentId");
+
+  // creation order: depth-first from the top, siblings as arranged
+  const kids = new Map<string | null, It[]>();
+  for (const it of kept) {
+    const p = it.parentKey;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p)!.push(it);
+  }
+  for (const list of kids.values()) list.sort((a, b) => a.index - b.index);
+  const ordered: Node[] = [];
+  const walk = (p: string | null) => {
+    for (const it of kids.get(p) ?? []) {
+      it.node.parentKey = it.parentKey;
+      it.node.parentPage = it.parentPage;
+      ordered.push(it.node);
+      walk(it.node.key);
+    }
+  };
+  walk(null);
+  return { ordered, pageTitles: new Map([...pages].map(([id, v]) => [id, v.title])) };
+}
+
 /**
  * Imports a ZIP (wiki export or any folder of .md files) or a single .md file.
  * `apply=false` only plans and reports; nothing is written.
  */
 export async function importArchive(
   file: string,
-  opts: { apply: boolean; conflict: Conflict; userId: number; singleName?: string },
+  opts: { apply: boolean; conflict: Conflict; userId: number; singleName?: string; layout?: unknown },
 ): Promise<ImportResult> {
   const warnings: string[] = [];
   const head = Buffer.alloc(4);
@@ -402,19 +608,10 @@ export async function importArchive(
 
 async function plan(
   entries: Entry[],
-  opts: { apply: boolean; conflict: Conflict; userId: number },
+  opts: { apply: boolean; conflict: Conflict; userId: number; layout?: unknown },
   warnings: string[],
 ): Promise<ImportResult> {
   // ---- pages: folder structure -> hierarchy
-  type Node = {
-    key: string;
-    title: string;
-    slug: string;
-    content: string;
-    parentKey: string | null;
-    depth: number;
-    path: string;
-  };
   const nodes = new Map<string, Node>();
   const keyOf = (p: string) => {
     const s = p.replace(/\.(md|markdown)$/i, "");
@@ -436,6 +633,7 @@ async function plan(
       slug: slugify(seg),
       content: fm.body,
       parentKey: null,
+      parentPage: null,
       depth: 0,
       path: e.path,
     });
@@ -452,6 +650,7 @@ async function plan(
           slug: slugify(segs[i - 1]),
           content: "",
           parentKey: null,
+          parentPage: null,
           depth: 0,
           path: `${k}/`,
         });
@@ -467,40 +666,63 @@ async function plan(
       warnings.push(`${n.path}: nested too deeply, placed under “${nodes.get(parent!)?.title}”`);
     n.parentKey = parent;
   }
-  const ordered = [...nodes.values()].sort(
+  const defaultOrder = [...nodes.values()].sort(
     (a, b) => a.key.split("/").length - b.key.split("/").length || a.key.localeCompare(b.key),
   );
-  if (ordered.length > 2000) throw new HttpError(413, "The archive has too many files.");
+  if (defaultOrder.length > 2000) throw new HttpError(413, "The archive has too many files.");
+
+  // ---- existing pages with the same address, and what happens to them
+  const existing = new Map(
+    (
+      await all<{ slug: string; id: number; title: string; depth: number }>(
+        sql`WITH RECURSIVE up(id, cur, d) AS (
+              SELECT id, parent_id, 1 FROM pages WHERE slug = ANY(${defaultOrder.map((n) => n.slug)}::text[])
+              UNION ALL SELECT up.id, p.parent_id, up.d + 1 FROM up JOIN pages p ON p.id = up.cur WHERE up.d < 50
+            )
+            SELECT p.slug, p.id, p.title, MAX(up.d) AS depth FROM up JOIN pages p ON p.id = up.id
+            GROUP BY p.slug, p.id, p.title`,
+      )
+    ).map((r) => [r.slug, r]),
+  );
+  const claimed = new Set<string>(); // a slug used twice inside the archive must not "conflict" with itself
+  const actionOf = new Map<string, PlanItem["action"]>();
+  const existsFor = new Map<string, boolean>();
+  for (const n of defaultOrder) {
+    const ex = !claimed.has(n.slug) && existing.has(n.slug);
+    claimed.add(n.slug);
+    existsFor.set(n.key, ex);
+    actionOf.set(
+      n.key,
+      !ex ? "create" : opts.conflict === "overwrite" ? "overwrite" : opts.conflict === "copy" ? "copy" : "skip",
+    );
+  }
+
+  // ---- the order and chapters: the archive's folders, or how the person arranged them
+  const arranged = opts.layout === undefined ? null : await arrange(nodes, opts.layout, actionOf, existsFor, existing);
+  const ordered = arranged ? arranged.ordered : defaultOrder;
+  const parentPageTitle = arranged?.pageTitles ?? new Map<number, string>();
 
   // ---- media: reuse identical names (re-import into the same wiki), otherwise store through the upload pipeline
   const mediaEntries = entries.filter((e) => e.kind === "media");
   const rename = new Map<string, string>();
   let mediaReused = 0;
   const stored: string[] = [];
-  const claimed = new Set<string>(); // a slug used twice inside the archive must not "conflict" with itself
-  const existingSlugs = new Set(
-    (
-      await all<{ slug: string }>(sql`SELECT slug FROM pages WHERE slug = ANY(${ordered.map((n) => n.slug)}::text[])`)
-    ).map((r) => r.slug),
-  );
-  const planItems: PlanItem[] = ordered.map((n) => {
-    const existing = claimed.has(n.slug) ? undefined : existingSlugs.has(n.slug) || undefined;
-    claimed.add(n.slug);
-    const action: PlanItem["action"] = !existing
-      ? "create"
-      : opts.conflict === "overwrite"
-        ? "overwrite"
-        : opts.conflict === "copy"
-          ? "copy"
-          : "skip";
-    return {
-      path: n.path,
-      title: n.title,
-      slug: n.slug,
-      parent: n.parentKey ? nodes.get(n.parentKey)!.title : null,
-      action,
-    };
-  });
+  const planItems: PlanItem[] = ordered.map((n) => ({
+    key: n.key,
+    path: n.path,
+    title: n.title,
+    slug: n.slug,
+    parent: n.parentKey
+      ? nodes.get(n.parentKey)!.title
+      : n.parentPage
+        ? (parentPageTitle.get(n.parentPage) ?? null)
+        : null,
+    parentKey: n.parentKey,
+    parentPage: n.parentPage,
+    action: actionOf.get(n.key)!,
+    exists: existsFor.get(n.key)!,
+    existingDepth: existsFor.get(n.key) ? (existing.get(n.slug)?.depth ?? null) : null,
+  }));
   const result: ImportResult = {
     pages: planItems,
     media: mediaEntries.length,
@@ -509,6 +731,7 @@ async function plan(
     created: 0,
     updated: 0,
     skipped: planItems.filter((p) => p.action === "skip").length,
+    excluded: nodes.size - ordered.length,
   };
   if (!opts.apply) return result;
 
@@ -557,7 +780,7 @@ async function plan(
       for (let i = 0; i < ordered.length; i++) {
         const n = ordered[i];
         const item = planItems[i];
-        const parentId = n.parentKey ? (idByKey.get(n.parentKey) ?? null) : null;
+        const parentId = n.parentPage ?? (n.parentKey ? (idByKey.get(n.parentKey) ?? null) : null);
         const existing = item.action === "create" || item.action === "copy" ? undefined : await getPage(n.slug);
         if (item.action === "skip" && existing) {
           idByKey.set(n.key, existing.id);

@@ -1,6 +1,15 @@
 import "./setup-env";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -16,9 +25,12 @@ import { MEDIA_DIR } from "@/lib/media";
 import { getSettings, updateSettings } from "@/lib/settings";
 import { CHUNK, openBuffer, sealBuffer, resetBackupKeys } from "@/lib/backup-crypto";
 import { resetMasterKeyForTests } from "@/lib/crypto";
-import { checkS3Config, LocalStore, S3Store, signV4 } from "@/lib/backup-store";
+import { checkLocalDir, checkS3Config, LocalStore, S3Store, signV4 } from "@/lib/backup-store";
+import { DATA_DIR } from "@/lib/config";
 import {
   backupIfDue,
+  backupRoots,
+  checkBackupDir,
   backupZipStream,
   createBackup,
   deleteBackup,
@@ -531,6 +543,109 @@ describe("S3", () => {
     } finally {
       setStoreForTests(new LocalStore(storeDir));
       await s3.close();
+    }
+  });
+});
+
+/* ================================================================ local folder */
+
+describe("backup folder chosen in the settings", () => {
+  const roots = () => [path.join(scratch, "nas")];
+  const check = (p: unknown) => checkLocalDir(p, { roots: roots(), avoid: [DATA_DIR, process.cwd()] });
+
+  it("accepts only plain, existing folders inside the allowed roots", () => {
+    const nas = path.join(scratch, "nas");
+    mkdirSync(path.join(nas, "wiki"), { recursive: true });
+    expect(check(nas + "/wiki/")).toBe(nas + "/wiki"); // trailing slash dropped
+    expect(check(nas)).toBe(nas);
+    for (const bad of [
+      "",
+      "relative/dir",
+      `${nas}/../nas/wiki`,
+      `${nas}/./wiki`,
+      `${nas}//wiki`,
+      `${nas}/wi;ki`,
+      `${nas}/wi$(id)ki`,
+      `${nas}/wi\nki`,
+      `${nas}/ wiki`,
+      `${nas}/wiki\u0000`,
+      "x".repeat(300),
+      42,
+      null,
+      ["/mnt"],
+    ])
+      expect(() => check(bad), String(bad)).toThrow(/absolute path/);
+    for (const bad of ["/", "/etc", "/etc/cron.d", "/proc/self", "/root", "/srvx", path.join(scratch, "other")])
+      expect(() => check(bad), bad).toThrow(/isn’t allowed/);
+    // never the wiki's own data (or anything containing it)
+    expect(() => checkLocalDir(DATA_DIR, { roots: [path.dirname(DATA_DIR)], avoid: [DATA_DIR] })).toThrow(/own data/);
+    expect(() => checkLocalDir(path.dirname(DATA_DIR), { roots: [path.dirname(DATA_DIR)], avoid: [DATA_DIR] })).toThrow(
+      /own data/,
+    );
+    expect(() => check(path.join(nas, "missing"))).toThrow(/doesn’t exist/);
+    writeFileSync(path.join(nas, "a-file"), "x");
+    expect(() => check(path.join(nas, "a-file"))).toThrow(/doesn’t exist/);
+    // a link that leads out of the allowed area is refused, not followed
+    symlinkSync("/etc", path.join(nas, "sneaky"));
+    expect(() => check(path.join(nas, "sneaky"))).toThrow(/link/);
+  });
+
+  it("the default list of roots is fixed; WIKI_BACKUP_ROOTS replaces it and can't open up /", () => {
+    const old = process.env.WIKI_BACKUP_ROOTS;
+    try {
+      delete process.env.WIKI_BACKUP_ROOTS;
+      expect(backupRoots()).toEqual(expect.arrayContaining(["/backups", "/mnt", "/media", "/srv"]));
+      process.env.WIKI_BACKUP_ROOTS = " /, /mnt/nas/ , relative, /a/../etc ,/srv";
+      expect(backupRoots()).toEqual(["/mnt/nas", "/srv"]);
+      expect(checkBackupDir("")).toBe(""); // empty = the default folder
+      expect(() => checkBackupDir("/etc")).toThrow(/isn’t allowed/);
+    } finally {
+      if (old === undefined) delete process.env.WIKI_BACKUP_ROOTS;
+      else process.env.WIKI_BACKUP_ROOTS = old;
+    }
+  });
+
+  it("a chosen folder that isn't there (share not mounted) fails loudly instead of being created", async () => {
+    const gone = path.join(scratch, "nas", "unmounted");
+    const st = new LocalStore(gone, { mustExist: true });
+    await expect(testBackupTarget(st)).rejects.toThrow(/doesn’t exist/);
+    await expect(st.list("v2/")).rejects.toThrow(/doesn’t exist/);
+    expect(existsSync(gone)).toBe(false);
+  });
+
+  it("never follows a link planted in the backup folder (read, write, list, delete)", async () => {
+    const root = path.join(scratch, "linked");
+    const elsewhere = path.join(scratch, "elsewhere");
+    mkdirSync(path.join(root, "v2", "objects"), { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    const st = new LocalStore(root);
+    const id = "20260101-000000-abcdef";
+    // a backup file that is really a link to a secret elsewhere
+    writeFileSync(path.join(elsewhere, "secret"), "master key material");
+    symlinkSync(path.join(elsewhere, "secret"), path.join(root, "v2", `${id}.data`));
+    await expect(st.get(`v2/${id}.data`)).rejects.toThrow(/link/);
+    await expect(st.exists(`v2/${id}.data`)).rejects.toThrow(/link/);
+    expect((await st.list("v2/")).map((x) => x.key)).toEqual([]);
+    // writing over it replaces the link, never the file it points to
+    const src = path.join(scratch, "payload");
+    writeFileSync(src, "new");
+    await expect(st.put(`v2/${id}.data`, src)).rejects.toThrow(/link/);
+    expect(readFileSync(path.join(elsewhere, "secret"), "utf8")).toBe("master key material");
+    // a linked folder on the way
+    rmSync(path.join(root, "v2"), { recursive: true });
+    symlinkSync(elsewhere, path.join(root, "v2"));
+    await expect(st.list("v2/")).rejects.toThrow(/link/);
+    await expect(st.put(`v2/${id}.manifest`, src)).rejects.toThrow(/link/);
+    await expect(st.delete(`v2/${id}.manifest`)).rejects.toThrow(/link/);
+    expect(readdirSync(elsewhere)).toEqual(["secret"]);
+  });
+
+  it("switched off: no automatic backups (manual ones are refused by the API)", async () => {
+    await updateSettings({ backup_enabled: false });
+    try {
+      expect(await backupIfDue()).toBeNull();
+    } finally {
+      await updateSettings({ backup_enabled: true });
     }
   });
 });

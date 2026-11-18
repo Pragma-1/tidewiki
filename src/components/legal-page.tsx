@@ -7,7 +7,7 @@ import { getLegal, isLegalEnabled, missingOperatorFields, viaCloudflare, type Le
 import { renderMarkdown } from "@/lib/markdown";
 import { getLang } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
-import { getSettings } from "@/lib/settings";
+import { getSettings, renderSettings } from "@/lib/settings";
 
 /** Privacy notice, terms and imprint: always public, even when the wiki itself requires sign-in. */
 export async function LegalPage({ k }: { k: LegalKey }) {
@@ -18,7 +18,7 @@ export async function LegalPage({ k }: { k: LegalKey }) {
   const page = await getLegal(k, lang, { cloudflare: viaCloudflare(await headers()) });
   const { html } = renderMarkdown(page.content, {
     lang,
-    autoloadExternal: (await getSettings()).external_media_autoload,
+    ...renderSettings(await getSettings()),
   });
   const missing = user?.role === "admin" && !page.custom ? await missingOperatorFields() : [];
   return (

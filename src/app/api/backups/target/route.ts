@@ -1,9 +1,19 @@
 import { api, json } from "@/lib/api";
 import { audit } from "@/lib/audit";
 import { getSettings, updateSettings } from "@/lib/settings";
-import { hasS3Secret, s3ConfigFromSettings, setS3Secret, testBackupTarget, LOCAL_BACKUP_DIR } from "@/lib/backup";
+import {
+  backupRoots,
+  checkBackupDir,
+  DEFAULT_BACKUP_DIR,
+  hasS3Secret,
+  localBackupDir,
+  localStore,
+  s3ConfigFromSettings,
+  setS3Secret,
+  testBackupTarget,
+} from "@/lib/backup";
 import { assertOwner, assertOwnerPassword } from "@/lib/backup-auth";
-import { checkS3Config, LocalStore, S3Store } from "@/lib/backup-store";
+import { checkS3Config, S3Store } from "@/lib/backup-store";
 import { consume } from "@/lib/rate-limit";
 import { HttpError, isRecord, str } from "@/lib/validate";
 export const dynamic = "force-dynamic";
@@ -12,7 +22,10 @@ const view = async () => {
   const s = await getSettings();
   return {
     target: s.backup_target,
-    local_dir: LOCAL_BACKUP_DIR(),
+    local_dir: localBackupDir(s),
+    local_default: DEFAULT_BACKUP_DIR(),
+    local_custom: s.backup_local_dir,
+    local_roots: backupRoots(),
     s3: {
       endpoint: s.backup_s3_endpoint,
       region: s.backup_s3_region,
@@ -34,7 +47,8 @@ export const GET = api("admin", async ({ user }) => {
 /**
  * Changes where backups go (owner + password). The new target is tested — write, read back,
  * delete — before it is saved, so a typo can't silently stop the backups.
- * Body: { password, target: "local" | "s3", s3?: { endpoint, region, bucket, prefix, access_key, path_style, secret? } }
+ * Body: { password, target: "local" | "s3", dir?: "/mnt/nas" (local; "" = default folder),
+ *         s3?: { endpoint, region, bucket, prefix, access_key, path_style, secret? } }
  * or { action: "test" } to test the current target.
  */
 export const PUT = api("admin", async ({ body, user, ip }) => {
@@ -44,10 +58,11 @@ export const PUT = api("admin", async ({ body, user, ip }) => {
   if (b.action === "test") return json(await testBackupTarget());
   await assertOwnerPassword(user, b.password);
   if (b.target === "local") {
-    await testBackupTarget(new LocalStore(LOCAL_BACKUP_DIR()));
-    const r = await updateSettings({ backup_target: "local" });
+    const dir = checkBackupDir(b.dir ?? "");
+    await testBackupTarget(localStore(dir || DEFAULT_BACKUP_DIR()));
+    const r = await updateSettings({ backup_target: "local", backup_local_dir: dir });
     if (!r.ok) throw new HttpError(400, r.error);
-    await audit("admin.settings_changed", user!.id, ip, "backup_target=local");
+    await audit("admin.settings_changed", user!.id, ip, `backup_target=local ${dir || "default"}`);
     return json(await view());
   }
   if (b.target !== "s3" || !isRecord(b.s3)) throw new HttpError(400, "Choose where backups should go.");

@@ -22,6 +22,7 @@ import {
   trashCount,
   trashId,
   trashPage,
+  trashPages,
 } from "@/lib/trash";
 import { purgeExpired } from "@/lib/retention";
 import { search } from "@/lib/search";
@@ -187,5 +188,64 @@ describe("versions", () => {
     expect(editComment(" Tippfehler ")).toBe("Tippfehler");
     for (const bad of ["a\nb", "a\rb", "a\tb", "x‮y", "a b", "a".repeat(201), "\u0000", 5, {}])
       expect(() => editComment(bad)).toThrow();
+  });
+});
+
+describe("deleting several pages at once", () => {
+  it("trashes the selection deepest first, so a chapter and its sub-pages come back together", async () => {
+    const ch = await mk("Bulk Kapitel");
+    const sub = await mk("Bulk Unter", "", ch.id);
+    const subsub = await mk("Bulk Unterunter", "", sub.id);
+    const other = await mk("Bulk Andere");
+    const kept = await mk("Bulk bleibt", "", ch.id); // not selected: moves to the top level
+    const r = await trashPages([subsub.slug, ch.slug, other.slug, sub.slug, sub.slug], uid, () => true);
+    expect(r.trashed.map((x) => x.slug)).toEqual([subsub.slug, sub.slug, ch.slug, other.slug]);
+    expect(r.missing).toBe(1); // the duplicate counts as "already gone", nothing breaks
+    expect((await getPage(kept.slug))!.parent_id).toBeNull();
+    for (const p of [ch, sub, subsub, other]) expect(await getPage(p.slug)).toBeUndefined();
+    // restoring the chapter, then its sub-page, puts them back under each other
+    const items = await listTrash();
+    const idOf = (slug: string) => items.find((i) => i.slug === slug)!.id;
+    await restoreFromTrash(idOf(ch.slug));
+    await restoreFromTrash(idOf(sub.slug));
+    await restoreFromTrash(idOf(subsub.slug));
+    expect((await getPage(sub.slug))!.parent_id).toBe((await getPage(ch.slug))!.id);
+    expect((await getPage(subsub.slug))!.parent_id).toBe((await getPage(sub.slug))!.id);
+  });
+
+  it("all or nothing: one page the person may not delete and nothing is deleted", async () => {
+    const other = await addUser("bulk-other", "editor");
+    const mine = await mk("Bulk meins");
+    const theirs = await createPage({ title: "Bulk fremd", content: "", parentId: null, userId: other });
+    await expect(trashPages([mine.slug, theirs.slug], uid, (p) => p.created_by === uid)).rejects.toMatchObject({
+      status: 403,
+    });
+    expect(await getPage(mine.slug)).toBeDefined();
+    expect(await getPage(theirs.slug)).toBeDefined();
+    // pages that don't exist (any more) are just counted
+    const r = await trashPages([mine.slug, "gibt-es-nicht"], uid, (p) => p.created_by === uid);
+    expect(r).toMatchObject({ missing: 1 });
+    expect(r.trashed).toHaveLength(1);
+  });
+
+  it("a page can't be moved so that its sub-pages end up too deep", async () => {
+    const a = await mk("Tief A");
+    const b = await mk("Tief B", "", a.id); // level 2
+    const x = await mk("Tief X");
+    await mk("Tief X1", "", x.id); // X has one level below it
+    // X under B would put X1 on level 4 (the limit is 3)
+    const cur = (await getPage(x.slug))!;
+    await expect(
+      updatePage(x.slug, { title: cur.title, content: "", parentId: b.id, expectedRev: cur.rev, userId: uid }),
+    ).rejects.toMatchObject({ status: 400 });
+    // under A (level 1) it fits: X on 2, X1 on 3
+    const ok = await updatePage(x.slug, {
+      title: cur.title,
+      content: "",
+      parentId: a.id,
+      expectedRev: cur.rev,
+      userId: uid,
+    });
+    expect(ok.parent_id).toBe(a.id);
   });
 });

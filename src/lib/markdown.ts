@@ -57,8 +57,8 @@ function wikiLinks(md: MD) {
   });
 }
 
-type Env = { lang: Lang; autoloadExternal: boolean };
-const DEFAULT_ENV: Env = { lang: "en", autoloadExternal: false };
+type Env = { lang: Lang; autoloadExternal: boolean; privacyHref: string | null };
+const DEFAULT_ENV: Env = { lang: "en", autoloadExternal: false, privacyHref: "/privacy" };
 const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const PROVIDER = { youtube: "YouTube", vimeo: "Vimeo" } as const;
@@ -79,7 +79,7 @@ function mediaHtml(raw: string, title: string, env: Env, asImage: boolean): stri
     return (
       `<div class="embed embed-${e.kind}" data-embed="${e.kind}" data-id="${esc(e.id)}"><div class="embed-inner">` +
       `<p class="embed-title">${esc(title || t(msg("Video on {provider}"), { provider: name }))}</p>` +
-      `<p class="embed-note">${esc(t(msg("Playing this video loads it from {provider}, which receives your IP address and may set cookies."), { provider: name }))} <a href="/privacy">${esc(t(msg("Privacy notice")))}</a></p>` +
+      `<p class="embed-note">${esc(t(msg("Playing this video loads it from {provider}, which receives your IP address and may set cookies."), { provider: name }))}${env.privacyHref ? ` <a href="${esc(env.privacyHref)}">${esc(t(msg("Privacy notice")))}</a>` : ""}</p>` +
       `<p><button type="button" class="embed-load">${esc(t(msg("Load video")))}</button> <a class="embed-open" href="${esc(e.href)}">${esc(t(msg("Open on {provider}"), { provider: name }))}</a></p></div></div>`
     );
   }
@@ -403,12 +403,16 @@ const sizes = new Map<string, number>();
 const CACHE_MAX_BYTES = 24 * 1024 * 1024;
 let cacheBytes = 0;
 
-export type RenderOptions = { lang?: Lang; autoloadExternal?: boolean };
+export type RenderOptions = { lang?: Lang; autoloadExternal?: boolean; privacyHref?: string | null };
 
 export function renderMarkdown(src: string, opts: RenderOptions = {}): { html: string; toc: TocItem[] } {
-  const env: Env = { lang: opts.lang ?? "en", autoloadExternal: !!opts.autoloadExternal };
+  const env: Env = {
+    lang: opts.lang ?? "en",
+    autoloadExternal: !!opts.autoloadExternal,
+    privacyHref: opts.privacyHref === undefined ? "/privacy" : opts.privacyHref,
+  };
   const key = createHash("sha256")
-    .update(`${env.lang}|${env.autoloadExternal ? 1 : 0}|`)
+    .update(`${env.lang}|${env.autoloadExternal ? 1 : 0}|${env.privacyHref ?? ""}|`)
     .update(src)
     .digest("hex");
   const hit = cache.get(key);

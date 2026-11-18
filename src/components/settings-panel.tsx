@@ -9,7 +9,16 @@ import { useToast } from "./ui";
 import { useLang, useT } from "./i18n";
 import type { Settings } from "@/lib/settings";
 
-type Row = { key: keyof Settings; title: string; desc: string; lockedHint?: string } & (
+type Row = {
+  key: keyof Settings;
+  title: string;
+  desc: string;
+  lockedHint?: string;
+  /** only shown while this switch is on */
+  showIf?: keyof Settings;
+  /** only shown while this switch is off */
+  hideIf?: keyof Settings;
+} & (
   | { kind: "bool" }
   | { kind: "int"; min: number; max: number; unit?: string }
   | { kind: "role" }
@@ -19,10 +28,29 @@ type Row = { key: keyof Settings; title: string; desc: string; lockedHint?: stri
   | { kind: "area" }
 );
 
-const LEGAL_SECTIONS: { title: string; rows: Row[] }[] = [
+const LEGAL_SECTIONS: { title: string; rows: Row[]; col?: 0 | 1 }[] = [
   {
     title: msg("Published pages"),
+    col: 0,
     rows: [
+      {
+        key: "legal_privacy_enabled",
+        kind: "bool",
+        title: msg("Privacy notice"),
+        desc: msg(
+          "Required as soon as the wiki processes personal data — accounts, e-mail addresses, IP addresses in the log (Art. 13 GDPR). Only switch it off if your privacy notice is published elsewhere, for example on your main website, and enter its address below.",
+        ),
+      },
+      {
+        key: "legal_privacy_url",
+        kind: "line",
+        type: "url",
+        hideIf: "legal_privacy_enabled",
+        title: msg("Privacy notice elsewhere"),
+        desc: msg(
+          "https address of your privacy notice. The footer, the sign-up form and the other legal pages link there. Empty: no link at all.",
+        ),
+      },
       {
         key: "legal_terms_enabled",
         kind: "bool",
@@ -43,6 +71,7 @@ const LEGAL_SECTIONS: { title: string; rows: Row[] }[] = [
   },
   {
     title: msg("Operator"),
+    col: 1,
     rows: [
       {
         key: "operator_name",
@@ -88,6 +117,7 @@ const LEGAL_SECTIONS: { title: string; rows: Row[] }[] = [
   },
   {
     title: msg("Privacy"),
+    col: 0, // right under the switches for the published pages
     rows: [
       {
         key: "ip_retention_days",
@@ -265,16 +295,19 @@ const SECURITY_SECTIONS: { title: string; rows: Row[]; note?: string }[] = [
 
 const BACKUP_SECTIONS: { title: string; rows: Row[]; note?: string }[] = [
   {
-    title: msg("Automatic backups"),
+    title: msg("Backup settings"),
     rows: [
       {
         key: "backup_enabled",
         kind: "bool",
-        title: msg("Back up automatically"),
-        desc: msg("A full backup (all pages with history, trash, accounts, settings, files) at a fixed interval."),
+        title: msg("Make backups"),
+        desc: msg(
+          "On: a full backup (all pages with history, trash, accounts, settings, files) at a fixed interval, and “Back up now”. Off: no new backups; existing ones stay and can still be restored.",
+        ),
       },
       {
         key: "backup_interval_hours",
+        showIf: "backup_enabled",
         kind: "int",
         min: 1,
         max: 168,
@@ -284,6 +317,7 @@ const BACKUP_SECTIONS: { title: string; rows: Row[]; note?: string }[] = [
       },
       {
         key: "backup_keep",
+        showIf: "backup_enabled",
         kind: "int",
         min: 1,
         max: 100,
@@ -306,7 +340,7 @@ export function SettingsPanel({
   group?: "general" | "security" | "legal" | "backups";
   locked?: (keyof Settings)[];
 }) {
-  const sections: { title: string; rows: Row[]; note?: string }[] =
+  const sections: { title: string; rows: Row[]; note?: string; col?: 0 | 1 }[] =
     group === "legal"
       ? LEGAL_SECTIONS
       : group === "security"
@@ -331,143 +365,159 @@ export function SettingsPanel({
       setS(initial);
     }
   };
+  // Two columns that fill independently, so a short panel never waits below a tall neighbour.
+  // A section goes to its fixed column, or else to the one that is shorter so far — estimated
+  // from all its rows, shown or not, so flipping a switch never moves panels around.
+  const columns: (typeof sections)[] = [[], []];
+  const heights = [0, 0];
+  for (const sec of sections) {
+    const h = 2 + sec.rows.reduce((a, r) => a + 1.5 + t(r.desc).length / 55, 0);
+    const c = sec.col ?? (heights[0] <= heights[1] ? 0 : 1);
+    columns[c].push(sec);
+    heights[c] += h;
+  }
   return (
-    <div className="settings-grid">
+    <div className="settings-cols">
       {toast.node}
-      {sections.map((sec) => (
-        <section key={sec.title} className="panel">
-          <h2 className="section-title">{t(sec.title)}</h2>
-          {sec.note && <p className="hint section-note">{t(sec.note)}</p>}
-          {sec.rows.map((r) => {
-            const id = `set-${r.key}`;
-            const isLocked = locked.includes(r.key);
-            return (
-              <div className="switch" key={r.key} data-locked={isLocked ? "1" : undefined}>
-                {r.kind === "bool" && (
-                  <input
-                    id={id}
-                    type="checkbox"
-                    role="switch"
-                    checked={s[r.key] as boolean}
-                    disabled={isLocked}
-                    aria-describedby={isLocked ? `${id}-lock` : undefined}
-                    onChange={(e) => {
-                      setS({ ...s, [r.key]: e.target.checked });
-                      void save(r.key, e.target.checked);
-                    }}
-                  />
-                )}
-                <div style={{ flex: 1 }}>
-                  <label className="t" htmlFor={id}>
-                    {t(r.title)}
-                  </label>
-                  <div className="d">{t(r.desc)}</div>
-                  {isLocked && (
-                    <div className="d lock-note" id={`${id}-lock`}>
-                      {t("Only the owner can change this.")}
+      {columns.map((col, ci) => (
+        <div key={ci} className="settings-col">
+          {col.map((sec) => (
+            <section key={sec.title} className="panel">
+              <h2 className="section-title">{t(sec.title)}</h2>
+              {sec.note && <p className="hint section-note">{t(sec.note)}</p>}
+              {sec.rows.map((r) => {
+                if ((r.showIf && !s[r.showIf]) || (r.hideIf && s[r.hideIf])) return null;
+                const id = `set-${r.key}`;
+                const isLocked = locked.includes(r.key);
+                return (
+                  <div className="switch" key={r.key} data-locked={isLocked ? "1" : undefined}>
+                    {r.kind === "bool" && (
+                      <input
+                        id={id}
+                        type="checkbox"
+                        role="switch"
+                        checked={s[r.key] as boolean}
+                        disabled={isLocked}
+                        aria-describedby={isLocked ? `${id}-lock` : undefined}
+                        onChange={(e) => {
+                          setS({ ...s, [r.key]: e.target.checked });
+                          void save(r.key, e.target.checked);
+                        }}
+                      />
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <label className="t" htmlFor={id}>
+                        {t(r.title)}
+                      </label>
+                      <div className="d">{t(r.desc)}</div>
+                      {isLocked && (
+                        <div className="d lock-note" id={`${id}-lock`}>
+                          {t("Only the owner can change this.")}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                {r.kind === "int" && (
-                  <span className="row nowrap">
-                    <input
-                      id={id}
-                      className="input"
-                      style={{ width: "5.5rem" }}
-                      type="number"
-                      min={r.min}
-                      max={r.max}
-                      defaultValue={s[r.key] as number}
-                      disabled={isLocked}
-                      onBlur={(e) => {
-                        const v = Number(e.target.value);
-                        if (Number.isInteger(v) && v !== s[r.key]) void save(r.key, v);
-                      }}
-                    />
-                    {r.unit && <span className="hint">{t(r.unit)}</span>}
+                    {r.kind === "int" && (
+                      <span className="row nowrap">
+                        <input
+                          id={id}
+                          className="input"
+                          style={{ width: "5.5rem" }}
+                          type="number"
+                          min={r.min}
+                          max={r.max}
+                          defaultValue={s[r.key] as number}
+                          disabled={isLocked}
+                          onBlur={(e) => {
+                            const v = Number(e.target.value);
+                            if (Number.isInteger(v) && v !== s[r.key]) void save(r.key, v);
+                          }}
+                        />
+                        {r.unit && <span className="hint">{t(r.unit)}</span>}
+                      </span>
+                    )}
+                    {r.kind === "role" && (
+                      <select
+                        id={id}
+                        className="input"
+                        style={{ width: "9rem" }}
+                        value={s.registration_role}
+                        onChange={(e) => void save("registration_role", e.target.value)}
+                      >
+                        <option value="editor">{t("Editor")}</option>
+                        <option value="viewer">{t("Viewer")}</option>
+                      </select>
+                    )}
+                    {r.kind === "lang" && (
+                      <select
+                        id={id}
+                        className="input"
+                        style={{ width: "9rem" }}
+                        value={s.language}
+                        onChange={(e) => void save("language", e.target.value)}
+                      >
+                        <option value="de">Deutsch</option>
+                        <option value="en">English</option>
+                      </select>
+                    )}
+                    {r.kind === "line" && (
+                      <input
+                        id={id}
+                        className="input"
+                        style={{ width: "16rem" }}
+                        type={r.type ?? "text"}
+                        defaultValue={s[r.key] as string}
+                        maxLength={254}
+                        onBlur={(e) => {
+                          if (e.target.value.trim() !== s[r.key]) void save(r.key, e.target.value);
+                        }}
+                      />
+                    )}
+                    {r.kind === "area" && (
+                      <textarea
+                        id={id}
+                        className="input"
+                        style={{ width: "16rem", minHeight: "5rem" }}
+                        defaultValue={s[r.key] as string}
+                        maxLength={1000}
+                        onBlur={(e) => {
+                          if (e.target.value.trim() !== s[r.key]) void save(r.key, e.target.value);
+                        }}
+                      />
+                    )}
+                    {r.kind === "text" && (
+                      <input
+                        id={id}
+                        className="input"
+                        style={{ width: "13rem" }}
+                        defaultValue={s.site_name}
+                        maxLength={60}
+                        onBlur={(e) => {
+                          if (e.target.value.trim() && e.target.value !== s.site_name)
+                            void save("site_name", e.target.value);
+                        }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+              {sec.title === "Sign-in security" && (
+                <div className="ladder">
+                  <span className="hint">{t("Lock-out steps")}:</span>
+                  <ol>
+                    {LADDER.map((sec, i) => (
+                      <li key={i}>{formatDuration(sec, lang)}</li>
+                    ))}
+                  </ol>
+                  <span className="hint">
+                    {t(
+                      "A successful sign-in or an administrator unlock resets the steps. After a day without a new lock-out they start again from the first step.",
+                    )}
                   </span>
-                )}
-                {r.kind === "role" && (
-                  <select
-                    id={id}
-                    className="input"
-                    style={{ width: "9rem" }}
-                    value={s.registration_role}
-                    onChange={(e) => void save("registration_role", e.target.value)}
-                  >
-                    <option value="editor">{t("Editor")}</option>
-                    <option value="viewer">{t("Viewer")}</option>
-                  </select>
-                )}
-                {r.kind === "lang" && (
-                  <select
-                    id={id}
-                    className="input"
-                    style={{ width: "9rem" }}
-                    value={s.language}
-                    onChange={(e) => void save("language", e.target.value)}
-                  >
-                    <option value="de">Deutsch</option>
-                    <option value="en">English</option>
-                  </select>
-                )}
-                {r.kind === "line" && (
-                  <input
-                    id={id}
-                    className="input"
-                    style={{ width: "16rem" }}
-                    type={r.type ?? "text"}
-                    defaultValue={s[r.key] as string}
-                    maxLength={254}
-                    onBlur={(e) => {
-                      if (e.target.value.trim() !== s[r.key]) void save(r.key, e.target.value);
-                    }}
-                  />
-                )}
-                {r.kind === "area" && (
-                  <textarea
-                    id={id}
-                    className="input"
-                    style={{ width: "16rem", minHeight: "5rem" }}
-                    defaultValue={s[r.key] as string}
-                    maxLength={1000}
-                    onBlur={(e) => {
-                      if (e.target.value.trim() !== s[r.key]) void save(r.key, e.target.value);
-                    }}
-                  />
-                )}
-                {r.kind === "text" && (
-                  <input
-                    id={id}
-                    className="input"
-                    style={{ width: "13rem" }}
-                    defaultValue={s.site_name}
-                    maxLength={60}
-                    onBlur={(e) => {
-                      if (e.target.value.trim() && e.target.value !== s.site_name)
-                        void save("site_name", e.target.value);
-                    }}
-                  />
-                )}
-              </div>
-            );
-          })}
-          {sec.title === "Sign-in security" && (
-            <div className="ladder">
-              <span className="hint">{t("Lock-out steps")}:</span>
-              <ol>
-                {LADDER.map((sec, i) => (
-                  <li key={i}>{formatDuration(sec, lang)}</li>
-                ))}
-              </ol>
-              <span className="hint">
-                {t(
-                  "A successful sign-in or an administrator unlock resets the steps. After a day without a new lock-out they start again from the first step.",
-                )}
-              </span>
-            </div>
-          )}
-        </section>
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
       ))}
     </div>
   );

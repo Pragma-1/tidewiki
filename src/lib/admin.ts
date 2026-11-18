@@ -1,4 +1,4 @@
-import { all, one, run, sql, tx, vacuum, now, pgCode } from "./db";
+import { all, one, run, sql, tx, wipe, now, pgCode } from "./db";
 import { audit, exportAudit } from "./audit";
 import { checkPasswordStrength, hashPassword } from "./password";
 import {
@@ -214,8 +214,8 @@ export async function eraseUser(targetId: number, actor: { id: number; ip: strin
       await run(sql`INSERT INTO erasures(user_id, erased_at) VALUES (${t.id}, ${now()}) ON CONFLICT DO NOTHING`);
     } else await audit("admin.user_deleted", actor.id, actor.ip, `#${t.id}`);
   });
-  // PostgreSQL keeps deleted rows as dead tuples until VACUUM; clean them up now rather than "some time".
-  await vacuum(["users", "audit_log", "sessions", "lockouts", "rate_limits", "totp_devices", "reset_tokens"]);
+  // gone from the database files too, not just marked as deleted (see wipe)
+  await wipe(["users", "audit_log", "sessions", "lockouts", "rate_limits", "totp_devices", "reset_tokens"]);
 }
 
 export async function deleteUser(actorId: number, targetId: number, ip: string | null) {

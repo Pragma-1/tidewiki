@@ -28,7 +28,7 @@ export const PUT = api("admin", async ({ body, user, ip }) => {
   if (Object.keys(b).some((k) => k.startsWith("backup_")) && !user!.isOwner)
     throw new HttpError(403, "Only the owner can change this.");
   // Where backups go is changed only through /api/backups/target (password + connection test).
-  if (Object.keys(b).some((k) => k === "backup_target" || k.startsWith("backup_s3_")))
+  if (Object.keys(b).some((k) => k === "backup_target" || k === "backup_local_dir" || k.startsWith("backup_s3_")))
     throw new HttpError(400, "Change the backup storage in the backup settings.");
 
   // The SMTP password is write-only and stored encrypted, outside the regular settings.

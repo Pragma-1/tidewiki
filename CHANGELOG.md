@@ -22,6 +22,10 @@ On its first start against the empty database the wiki imports `data/wiki.db` on
 
 ### Added
 
+- **Media: delete several at once, delete all unused.** _Einstellungen → Medien_ has checkboxes (shift-click for a range) and _Unbenutzte löschen_ — every file that no page and no page in the trash shows, plus stray files on disk without an entry. The list now also says when a file is only shown in the trash or only in older versions, and the confirmation spells out what will then be missing. API: `DELETE /api/media` with `{ ids }`, `POST /api/media/unused`.
+- **Privacy notice can be switched off** like terms and imprint — for when it is published elsewhere: enter its https address and the footer, sign-up form, legal pages and video notes link there; without an address there's no link at all.
+- **Delete several pages at once.** _Seiten verwalten_ (sidebar, editors and up) lists every page as a tree with checkboxes: ticking a chapter ticks its sub-pages, shift-click selects a range, a filter narrows the list. The selection goes to the trash in one step — sub-pages first, so a chapter and its sub-pages come back together; sub-pages that weren't selected move to the top level. Editors delete their own pages, administrators any; one page that isn't allowed and nothing is deleted. API: `DELETE /api/pages` with `{ slugs }` (at most 500).
+- **Arrange an import.** The import preview is now an editable tree: reorder pages, make them main pages or sub-pages (one level up / sub-page of the page above), move them to any chapter of the import or under an existing wiki page, rename them, or leave them out (their sub-pages move up a level). The nesting limit is shown and enforced. The previewed file is kept on the server for an hour for the person who uploaded it, so it isn't uploaded twice (`POST /api/import/apply` with `{ token, conflict, layout }`).
 - **Trash.** Deleting a page moves it with its whole history to the trash for 30 days (then it is removed for good by the hourly job). Visible to editors and up, with a preview; editors restore, administrators purge single pages or empty it. A restore keeps the old address if it is free, the old chapter if it still exists, and pulls former sub-pages back under it.
 - **Versions.** Optional edit summary when saving; per-version view, compare with current, `.md` download and restore in _Verlauf_. A restore is done on the server and creates a new version that records where it came from. Long histories are paged.
 - **Backups.** Scheduled and manual backups, a safety backup before every full restore and import, download and upload.
@@ -29,6 +33,8 @@ On its first start against the empty database the wiki imports `data/wiki.db` on
   - **Storage:** a folder (local disk, or an NFS/SMB share mounted as a Docker volume — examples in `docker.yaml`) or **S3-compatible storage**, set up by the owner in the wiki and tested before it is saved. The S3 secret is stored encrypted.
   - **Granular restore:** open a backup and restore a single page (as a new version, or recreated with its history and pictures if it was deleted) or a single deleted account (its pages are linked to it again) — or everything.
   - **Permissions:** administrators list, create, check and open backups and restore pages and editor/viewer accounts; restoring an administrator, a full restore (with password), download, upload, delete and the storage location are owner-only.
+  - **On/off:** one switch in _Einstellungen → Sicherungen_. Off: no automatic backups and no _Jetzt sichern_ (only the safety copy before a full restore or import is still made); existing backups stay and can be opened and restored.
+  - **Folder in the settings:** the owner can pick the backup folder (e.g. a NAS share mounted under `/mnt`) — only inside `WIKI_BACKUP_ROOTS` (default `/backups`, `/mnt`, `/media`, `/srv`), only existing folders, no links, never system folders or the wiki's data; tested before saving, never created on the fly.
   - Uploads are deduplicated across backups; old automatic backups and safety backups are pruned.
 - Privacy notice and personal-data export cover the trash and backups.
 - Terms of use and imprint can be switched off in _Einstellungen → Rechtliches_, for private wikis. The privacy notice always stays. Without an imprint, the postal address is no longer required.
@@ -37,15 +43,24 @@ On its first start against the empty database the wiki imports `data/wiki.db` on
 
 ### Security
 
+- **Deleted data is really gone from the database files.** Erasing an account, deleting a page for good and deleting a file now rewrite the affected tables (`VACUUM FULL`); before, a plain `VACUUM` left the deleted text in PostgreSQL's files until overwritten (a new test reads the raw files). A busy table is retried from a persistent list, so a wipe is never forgotten. Expired IP addresses and log entries get the same treatment.
+- Deleted uploads were already removed from disk; now files a crash left without an entry and abandoned partial uploads are removed too (hourly and with _Unbenutzte löschen_).
+- Next.js 16.4.6 (fixes GHSA-mfr8-8qww-v76h and GHSA-vc7v-qv4w-wrv8; Tidewiki doesn't use the affected `use cache`, so it wasn't exposed).
+- Moving a page now checks the depth of its sub-pages too, so they can't end up nested deeper than allowed.
+- The import arrangement from the browser is checked completely on the server: every page exactly once, chapters only from the archive or existing pages, no loops, the nesting limit; a preview token is bound to the admin who made it.
 - Every database query goes through a tagged template that only accepts bound parameters; identifiers only from allow-lists; a test fails on any raw query. SQL-injection payloads are part of the test suites and the fuzzer.
 - Transactions are `SERIALIZABLE` with retry, so concurrent requests can't create two owners, double-use an MFA attempt or lose an update. Statement and idle-transaction timeouts.
 - Database errors reach the browser only as generic messages (409 for conflicts, 400 for invalid data, 503 when the database is busy or unreachable).
 - An account its owner erased themselves can't come back from a backup — neither restored singly nor by a full restore.
 - The S3 endpoint and access key are visible only to the owner, not to other administrators.
+- The wiki never follows a symbolic link inside a backup folder, so write access to a NAS share isn't a way to read or overwrite files elsewhere.
 - S3 connections are pinned to the resolved address and refuse link-local, metadata and similar addresses; a backup folder prefix can't contain `..`.
 
 ### Fixed
 
+- The _Datenschutz_ panel under _Rechtliches_ started below the tall _Betreiber_ panel instead of right under the page switches. Settings panels now fill two independent columns.
+- The list of legal texts didn't follow the switches until the page was reloaded.
+- Selected text in warning and danger boxes (and in marked text) was hard to see — the see-through blue turned a dull grey on the beige/pink background, so marking text looked like it didn't work. Selections there are now a solid blue in both themes.
 - The legal-text and media-library API responses spread an unresolved promise into the response (found by the new type-aware lint).
 - Decrypting a backup whose last chunk was exactly full size failed.
 - Building the image no longer tries to reach the database.

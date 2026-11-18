@@ -7,7 +7,7 @@ import { getTrashItem, TRASH_DAYS } from "@/lib/trash";
 import { renderMarkdown } from "@/lib/markdown";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
-import { getSettings } from "@/lib/settings";
+import { getSettings, renderSettings } from "@/lib/settings";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
   return { title: (await getT())("Trash") };
@@ -24,7 +24,7 @@ export default async function TrashItem({ params }: { params: Promise<{ id: stri
   const t = makeT(lang);
   const { html } = renderMarkdown(item.content, {
     lang,
-    autoloadExternal: (await getSettings()).external_media_autoload,
+    ...renderSettings(await getSettings()),
   });
   return (
     <Shell wide>

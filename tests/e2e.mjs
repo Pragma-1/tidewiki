@@ -9,7 +9,7 @@ import pg from "pg";
 import { appEnv, createDatabase, startCluster, stopCluster } from "./pg-cluster.mjs";
 import { unzipSync, zipSync, strToU8 } from "fflate";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -17,6 +17,8 @@ const SERVER = process.env.E2E_SERVER_JS || path.resolve(import.meta.dirname, ".
 const PORT = 3100 + Math.floor(Math.random() * 500);
 const BASE = `http://127.0.0.1:${PORT}`;
 const DATA = mkdtempSync(path.join(tmpdir(), "tidewiki-e2e-"));
+// stands in for a NAS share mounted into the container: the only place the owner may point backups
+const NAS = mkdtempSync(path.join(tmpdir(), "tidewiki-e2e-nas-"));
 // a throw-away PostgreSQL; the server connects as an unprivileged role, like in production
 const cluster = await startCluster();
 const DBNAME = await createDatabase(cluster);
@@ -27,6 +29,7 @@ const env = {
   HOSTNAME: "127.0.0.1",
   WIKI_DATA_DIR: DATA,
   WIKI_BASE_URL: BASE,
+  WIKI_BACKUP_ROOTS: NAS,
   ...appEnv(cluster, DBNAME),
 };
 const dbq = async (text, params = []) => {
@@ -666,6 +669,54 @@ try {
   ok(!(await anon.req("GET", "/privacy")).text.includes("Cloudflare"), "no Cloudflare section on a direct request");
   await admin.req("PUT", "/api/settings", { legal_terms_enabled: true, legal_imprint_enabled: true });
   ok((await anon.req("GET", "/terms")).status === 200, "switching back restores the pages");
+
+  // the privacy notice can be switched off when it's published elsewhere
+  let urlBad = true;
+  for (const v of [
+    "javascript:alert(1)",
+    "http://example.com/datenschutz",
+    "https://user:pw@example.com/",
+    "https://exa mple.com/",
+    "ftp://example.com/",
+    "https://localhost/",
+    "//example.com/x",
+    "https://example.com/" + "x".repeat(300),
+  ]) {
+    const r = await admin.req("PUT", "/api/settings", { legal_privacy_url: v });
+    if (r.status !== 400) {
+      urlBad = false;
+      console.log("   privacy url accepted:", v, r.status);
+    }
+  }
+  ok(urlBad, "privacy address: only plain https addresses");
+  ok(
+    (
+      await admin.req("PUT", "/api/settings", {
+        legal_privacy_enabled: false,
+        legal_privacy_url: "https://example.com/datenschutz?a=1&b=2",
+      })
+    ).status === 200,
+    "privacy notice switched off, published elsewhere",
+  );
+  const elsewhere = (await anon.req("GET", "/")).text;
+  ok(
+    (await anon.req("GET", "/privacy")).status === 404 &&
+      elsewhere.includes('href="https://example.com/datenschutz?a=1&amp;b=2"') &&
+      !elsewhere.includes('href="/privacy"'),
+    "the footer links to the address elsewhere, /privacy is gone",
+  );
+  ok((await anon.req("GET", "/terms")).text.includes("https://example.com/datenschutz"), "the terms point there too");
+  await admin.req("PUT", "/api/settings", { legal_privacy_url: "" });
+  const nowhere = (await anon.req("GET", "/terms")).text;
+  ok(
+    !nowhere.includes('href="/privacy"') && nowhere.includes("erfahren Sie beim Betreiber"),
+    "without an address no link is shown anywhere",
+  );
+  ok(
+    (await admin.req("PUT", "/api/settings", { legal_privacy_enabled: true })).status === 200 &&
+      (await anon.req("GET", "/privacy")).status === 200,
+    "privacy notice back on",
+  );
   for (const p of ["/settings?tab=legal", "/settings?tab=media"])
     ok((await admin.req("GET", p)).status === 200, `${p} renders`);
   ok((await admin.req("DELETE", `/api/media/${ml.json.files[0].id}`)).status === 200, "admin deletes a file");
@@ -733,6 +784,78 @@ try {
   ok((await anon.req("GET", "/w/teil")).status === 404, "preview changed nothing");
   const ap = await imp(admin, "apply");
   ok(ap.status === 200 && ap.json.created === 2, "import applied");
+
+  // --- arranging an import: preview keeps the file (token), apply takes the arrangement
+  const arrZip = Buffer.from(
+    zipSync({
+      "ordner/index.md": strToU8("# Ordner"),
+      "ordner/erste.md": strToU8("# Erste"),
+      "ordner/zweite.md": strToU8("# Zweite"),
+      "lose.md": strToU8("# Lose"),
+    }),
+  );
+  const previewArr = async (c) => {
+    const r = await fetch(`${BASE}/api/import?mode=preview&conflict=copy&name=arr.zip`, {
+      method: "POST",
+      headers: {
+        origin: BASE,
+        "content-type": "application/octet-stream",
+        cookie: Object.entries(c.jar)
+          .map(([k, v]) => `${k}=${v}`)
+          .join("; "),
+      },
+      body: arrZip,
+    });
+    return r.json();
+  };
+  const ap1 = await previewArr(admin);
+  ok(typeof ap1.token === "string" && ap1.pages.every((p) => p.key && "parentKey" in p), "preview hands out a token");
+  const arrLayout = [
+    { key: "lose", parent: null, include: true, title: "Lose Blätter" },
+    { key: "ordner", parent: null, include: true },
+    { key: "ordner/zweite", parent: "ordner", include: true },
+    { key: "ordner/erste", parent: "ordner/zweite", include: true }, // demoted under its sibling
+  ];
+  const applyArr = (c, body, origin) => c.req("POST", "/api/import/apply", body, origin ? { origin } : undefined);
+  ok(
+    (await applyArr(anon, { token: ap1.token, layout: arrLayout })).status === 401 &&
+      (await applyArr(bob, { token: ap1.token, layout: arrLayout })).status === 403,
+    "applying an import is admin-only",
+  );
+  ok(
+    (await applyArr(admin, { token: ap1.token, layout: arrLayout }, "https://evil.example")).status === 403,
+    "applying is CSRF-protected",
+  );
+  let arrBad = true;
+  for (const layout of [
+    "x",
+    [],
+    arrLayout.slice(1),
+    arrLayout.map((x, i) => (i === 0 ? { ...x, parent: "lose" } : x)),
+    arrLayout.map((x, i) => (i === 1 ? { ...x, parent: "ordner/erste" } : x)),
+    arrLayout.map((x, i) => (i === 0 ? { ...x, parent: "page:1' OR '1'='1" } : x)),
+    arrLayout.map((x, i) => (i === 0 ? { ...x, key: "' OR 1=1 --" } : x)),
+  ]) {
+    const r = await applyArr(admin, { token: ap1.token, conflict: "copy", layout });
+    if (r.status !== 400) {
+      arrBad = false;
+      console.log("   layout accepted:", JSON.stringify(layout).slice(0, 80), r.status);
+    }
+  }
+  ok(arrBad, "malformed arrangements are refused (and the preview stays usable)");
+  for (const tok of ["", "x".repeat(32), "../../etc/passwd", 42])
+    ok(
+      (await applyArr(admin, { token: tok, layout: arrLayout })).status === 410,
+      `unknown preview token ${String(tok).slice(0, 12)} → 410`,
+    );
+  const ar = await applyArr(admin, { token: ap1.token, conflict: "copy", layout: arrLayout });
+  ok(ar.status === 200 && ar.json.created === 4, `arranged import applied (${ar.status})`);
+  const zw = await anon.req("GET", "/w/zweite");
+  ok(zw.status === 200 && (await anon.req("GET", "/w/lose")).text.includes("Lose Blätter"), "renamed page imported");
+  ok(
+    (await applyArr(admin, { token: ap1.token, conflict: "copy", layout: arrLayout })).status === 410,
+    "a preview can be applied once",
+  );
   const teil = await anon.req("GET", "/w/teil");
   ok(
     teil.status === 200 && teil.text.includes('class="copy-code"') && teil.text.includes("Kapitel"),
@@ -990,6 +1113,149 @@ try {
     const t2 = (await edda.req("GET", "/api/trash")).json.items.find((i) => i.slug === tslug);
     ok((await eve.req("DELETE", `/api/trash/${t2.id}`)).status === 200, "an admin purges it");
     ok(!(await eve.req("GET", "/api/trash")).json.items.some((i) => i.slug === tslug), "purged for good");
+
+    // --- deleting several pages at once
+    const mkp = async (c, title, parentId = null) =>
+      (await c.req("POST", "/api/pages", { title, content: "Massenlöschung", parentId })).json.slug;
+    const bulkA = await mkp(edda, "Sammel A");
+    const bulkAid = (await dbq("SELECT id FROM pages WHERE slug = $1", [bulkA]))[0].id;
+    const bulkA1 = await mkp(edda, "Sammel A1", Number(bulkAid));
+    const bulkB = await mkp(edda, "Sammel B");
+    const foreign = await mkp(eve, "Sammel fremd");
+    const del = (c, body, opts) => c.req("DELETE", "/api/pages", body, opts);
+    ok(
+      (await del(anon, { slugs: [bulkA] })).status === 401 && (await del(bob, { slugs: [bulkA] })).status === 403,
+      "bulk delete: guests and viewers can't",
+    );
+    ok(
+      (await del(edda, { slugs: [bulkA] }, { origin: "https://evil.example" })).status === 403,
+      "bulk delete is CSRF-protected",
+    );
+    let bulkBad = true;
+    for (const body of [
+      {},
+      { slugs: "a" },
+      { slugs: [] },
+      { slugs: [1] },
+      { slugs: ["A"] },
+      { slugs: ["a'; DROP TABLE pages; --"] },
+      { slugs: ["x".repeat(81)] },
+      { slugs: Array.from({ length: 501 }, (_, i) => `p-${i}`) },
+      { slugs: [{ $ne: null }] },
+    ]) {
+      const r = await del(edda, body);
+      if (r.status !== 400) {
+        bulkBad = false;
+        console.log("   bulk body accepted:", JSON.stringify(body).slice(0, 60), r.status);
+      }
+    }
+    ok(bulkBad, "bulk delete: malformed selections are refused");
+    const mixed = await del(edda, { slugs: [bulkA, foreign] });
+    ok(
+      mixed.status === 403 && (await anon.req("GET", `/w/${bulkA}`)).status === 200,
+      "an editor can't delete someone else's page — and then nothing is deleted",
+    );
+    const bd = await del(edda, { slugs: [bulkA, bulkA1, bulkB, "gibt-es-nicht"] });
+    ok(
+      bd.status === 200 && bd.json.trashed === 3 && bd.json.missing === 1,
+      `editor deletes three pages at once (${bd.status})`,
+    );
+    ok(
+      (await anon.req("GET", `/w/${bulkA1}`)).status === 404 &&
+        (await edda.req("GET", "/api/trash")).json.items.filter((i) => i.title.startsWith("Sammel")).length === 3,
+      "they wait in the trash",
+    );
+    ok((await del(eve, { slugs: [foreign] })).status === 200, "an admin deletes any page");
+    const pm = await edda.req("GET", "/pages");
+    ok(pm.status === 200 && pm.text.includes("Seiten verwalten"), "page manager for editors");
+    ok(
+      (await bob.req("GET", "/pages")).status === 307 && (await anon.req("GET", "/pages")).status === 307,
+      "page manager redirects viewers and guests",
+    );
+    ok(!(await bob.req("GET", "/")).text.includes('href="/pages"'), "viewers have no page-manager link");
+
+    // --- media: several at once, all unused at once, really gone
+    const mup = async (c, name) => {
+      const res = await fetch(`${BASE}/api/media?name=${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: {
+          origin: BASE,
+          "content-type": "application/octet-stream",
+          cookie: Object.entries(c.jar)
+            .map(([k, v]) => `${k}=${v}`)
+            .join("; "),
+        },
+        body: readFileSync(new URL("./fixtures/meta.png", import.meta.url)),
+      });
+      const j = await res.json();
+      return (await dbq("SELECT id, name FROM media WHERE name = $1", [j.url.slice(7)]))[0];
+    };
+    const mediaFile = (m) => path.join(DATA, "media", m.name);
+    const e1 = await mup(edda, "e1.png");
+    const e2 = await mup(edda, "e2.png");
+    const v1 = await mup(eve, "v1.png");
+    const mdel = (c, body, opts) => c.req("DELETE", "/api/media", body, opts);
+    ok(
+      (await mdel(anon, { ids: [Number(e1.id)] })).status === 401 &&
+        (await mdel(bob, { ids: [Number(e1.id)] })).status === 403,
+      "media bulk delete: guests and viewers can't",
+    );
+    ok(
+      (await mdel(edda, { ids: [Number(e1.id)] }, { origin: "https://evil.example" })).status === 403,
+      "media bulk delete is CSRF-protected",
+    );
+    let mBad = true;
+    for (const body of [
+      {},
+      { ids: [] },
+      { ids: "1" },
+      { ids: ["1"] },
+      { ids: [1.5] },
+      { ids: [-1] },
+      { ids: [2 ** 60] },
+      { ids: Array.from({ length: 1001 }, (_, i) => i + 1) },
+    ]) {
+      const r = await mdel(edda, body);
+      if (r.status !== 400) {
+        mBad = false;
+        console.log("   media body accepted:", JSON.stringify(body).slice(0, 50), r.status);
+      }
+    }
+    ok(mBad, "media bulk delete: malformed selections are refused");
+    ok(
+      (await mdel(edda, { ids: [Number(e1.id), Number(v1.id)] })).status === 403 &&
+        existsSync(mediaFile(e1)) &&
+        existsSync(mediaFile(v1)),
+      "an editor can't delete someone else's file — and then nothing is deleted",
+    );
+    const md = await mdel(edda, { ids: [Number(e1.id), Number(e2.id)] });
+    ok(
+      md.status === 200 && md.json.deleted === 2 && !existsSync(mediaFile(e1)) && !existsSync(mediaFile(e2)),
+      "editor deletes own files: gone from the disk",
+    );
+    ok((await anon.req("GET", `/media/${e1.name}`)).status === 404, "a deleted file is no longer served");
+    ok(
+      (await eve.req("POST", "/api/media/unused")).status === 200 &&
+        (await edda.req("POST", "/api/media/unused")).status === 403 &&
+        (await anon.req("POST", "/api/media/unused")).status === 401,
+      "“delete unused” is admin-only",
+    );
+    ok(!existsSync(mediaFile(v1)), "…and removed the unused file from the disk");
+    ok(
+      (await dbq("SELECT COUNT(*)::int n FROM media WHERE id = ANY($1::bigint[])", [[e1.id, e2.id, v1.id]]))[0].n === 0,
+      "…and from the database",
+    );
+    const usedStill = (await dbq("SELECT name FROM media"))
+      .map((r) => r.name)
+      .every((n) => existsSync(path.join(DATA, "media", n)));
+    ok(usedStill, "files that pages still show are kept");
+
+    // a preview belongs to the admin who made it
+    const evePrev = await previewArr(admin);
+    ok(
+      (await applyArr(eve, { token: evePrev.token, conflict: "copy", layout: arrLayout })).status === 410,
+      "another admin can't apply someone else's preview",
+    );
     const aud = await admin.req("GET", "/api/audit?category=pages&limit=50");
     ok(
       ["page.trashed", "page.restored", "page.purged", "page.version_restored"].every(
@@ -1051,6 +1317,80 @@ try {
       "S3 endpoint: no metadata addresses, no other schemes, no credentials in the URL",
     );
     ok((await admin.req("GET", "/api/backups/target")).json.target === "local", "a refused change saves nothing");
+
+    // another folder (a mounted share): owner + password, inside the allowed roots, tested before saving
+    const dirTry = (who, password, dir) => who.req("PUT", "/api/backups/target", { password, target: "local", dir });
+    const nasDir = path.join(NAS, "wiki");
+    mkdirSync(nasDir);
+    symlinkSync("/etc", path.join(NAS, "etc-link"));
+    ok((await dirTry(eve, PW, nasDir)).status === 403, "admins can't move the backups");
+    ok((await dirTry(admin, "wrong-wrong-wrong-1", nasDir)).status === 403, "moving the backups needs the password");
+    let dirsOk = true;
+    for (const bad of [
+      "/etc",
+      "/",
+      "relative",
+      `${NAS}/../etc`,
+      `${NAS}/wiki/../../etc`,
+      `${NAS}/etc-link`,
+      `${NAS}/missing`,
+      `${NAS}/wi;ki`,
+      DATA,
+      `${DATA}/media`,
+      42,
+      { a: 1 },
+      "x".repeat(400),
+    ]) {
+      // the password is checked first (no probing for folders without it), and each check counts
+      // against the re-authentication and storage-change limits — reset them so the list can be longer
+      await dbq("DELETE FROM rate_limits WHERE key LIKE 'reauth:%' OR key LIKE 'backup-target:%'");
+      const r = await dirTry(admin, PW, bad);
+      if (r.status !== 400) {
+        dirsOk = false;
+        console.log("   folder accepted or failed:", String(bad).slice(0, 40), r.status);
+      }
+    }
+    ok(dirsOk, "backup folder: system paths, traversal, links, missing folders and the data folder are refused");
+    ok(
+      (await admin.req("PUT", "/api/settings", { backup_local_dir: "/" })).status === 400,
+      "the folder can't be set through the general settings",
+    );
+    ok((await admin.req("GET", "/api/backups/target")).json.local_custom === "", "…and nothing was saved");
+    await dbq("DELETE FROM rate_limits WHERE key LIKE 'reauth:%' OR key LIKE 'backup-target:%'");
+    const moved = await dirTry(admin, PW, nasDir + "/");
+    ok(moved.status === 200 && moved.json.local_dir === nasDir, "the owner moves the backups to the share");
+    const b3 = await admin.req("POST", "/api/backups");
+    const listed = (await eve.req("GET", "/api/backups")).json.items.map((i) => i.id);
+    ok(
+      b3.status === 201 &&
+        existsSync(path.join(nasDir, "v2", `${b3.json.id}.manifest`)) &&
+        listed.includes(b3.json.id) &&
+        !listed.includes(b1.json.id),
+      "new backups land in the chosen folder; the old folder's backups aren't mixed in",
+    );
+    ok((await eve.req("GET", "/api/backups/target")).json.local_custom === undefined, "admins see only the folder");
+    ok((await dirTry(admin, PW, "")).status === 200, "back to the default folder");
+    ok(
+      (await eve.req("GET", "/api/backups")).json.items.some((i) => i.id === b1.json.id),
+      "…where the earlier backups show up again",
+    );
+
+    // switched off: nothing new is written, the existing backups stay usable
+    ok(
+      (await eve.req("PUT", "/api/settings", { backup_enabled: false })).status === 403,
+      "only the owner switches backups off",
+    );
+    ok(
+      (await admin.req("PUT", "/api/settings", { backup_enabled: false })).status === 200,
+      "the owner switches backups off",
+    );
+    ok((await eve.req("POST", "/api/backups")).status === 409, "switched off: “back up now” is refused");
+    ok(
+      (await eve.req("GET", `/api/backups/${b1.json.id}`)).status === 200,
+      "switched off: backups can still be opened",
+    );
+    ok((await eve.req("GET", "/settings?tab=backups")).text.includes("ausgeschaltet"), "the page says they are off");
+    ok((await admin.req("PUT", "/api/settings", { backup_enabled: true })).status === 200, "and on again");
 
     // look inside: pages and accounts, each marked whether it still exists
     const inside = await eve.req("GET", `/api/backups/${b1.json.id}`);
@@ -1718,6 +2058,7 @@ try {
   smtp.close();
   await new Promise((r) => setTimeout(r, 300));
   stopCluster(cluster);
+  for (const d of [DATA, NAS]) rmSync(d, { recursive: true, force: true });
 }
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) console.log("--- server log ---\n" + log.slice(-2000));

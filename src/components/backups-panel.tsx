@@ -35,6 +35,9 @@ type Target = {
   kind: "local" | "s3";
   where: string;
   localDir: string;
+  localDefault: string;
+  localCustom: string;
+  localRoots: string[];
   sameVolume: boolean;
   s3: {
     endpoint: string;
@@ -100,12 +103,15 @@ export function BackupsPanel({
   unreadable,
   listError,
   isOwner,
+  enabled,
   target,
 }: {
   items: BackupView[];
   unreadable: number;
+  /** null: the storage was read; "" or a message: it couldn't be */
   listError: string | null;
   isOwner: boolean;
+  enabled: boolean;
   target: Target;
 }) {
   const t = useT();
@@ -306,17 +312,32 @@ export function BackupsPanel({
                 </button>
               </>
             )}
-            <button type="button" className="btn sm" disabled={!!busy} onClick={() => void now()}>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={!!busy || !enabled}
+              title={enabled ? undefined : t("Backups are switched off.")}
+              onClick={() => void now()}
+            >
               <DatabaseBackup size={15} aria-hidden />
               {busy === "create" ? t("Backing up…") : t("Back up now")}
             </button>
           </div>
         </div>
-        {listError && (
+        {!enabled && (
+          <div className="notice">
+            <div>
+              {t(
+                "Backups are switched off: no new backups are made, neither automatically nor by hand. The backups below stay and can still be opened and restored.",
+              )}
+            </div>
+          </div>
+        )}
+        {listError !== null && (
           <div className="notice error" role="alert">
             <AlertTriangle size={18} aria-hidden />
             <div>
-              {t("The backup storage can’t be read right now.")} <span className="mono">{listError}</span>
+              {t("The backup storage can’t be read right now.")} {listError && t(listError)}
             </div>
           </div>
         )}
@@ -668,11 +689,13 @@ function StoragePanel({
   const t = useT();
   const [kind, setKind] = useState(target.kind);
   const [s3, setS3] = useState({ ...target.s3, secret: "" });
+  const [dir, setDir] = useState(target.localCustom);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState<"save" | "test" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const changed =
     kind !== target.kind ||
+    (kind === "local" && dir.trim() !== target.localCustom) ||
     (kind === "s3" &&
       (s3.endpoint !== target.s3.endpoint ||
         s3.region !== target.s3.region ||
@@ -688,6 +711,7 @@ function StoragePanel({
     const r = await call("/api/backups/target", "PUT", {
       password,
       target: kind,
+      ...(kind === "local" ? { dir: dir.trim() } : {}),
       ...(kind === "s3"
         ? {
             s3: {
@@ -746,16 +770,34 @@ function StoragePanel({
       </div>
       {kind === "local" ? (
         <>
+          <div className="field" style={{ maxWidth: "32rem" }}>
+            <label htmlFor="bk-dir">{t("Folder")}</label>
+            <input
+              id="bk-dir"
+              className="input mono"
+              value={dir}
+              placeholder={target.localDefault}
+              disabled={!isOwner}
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={255}
+              onChange={(e) => {
+                setDir(e.target.value);
+                setErr(null);
+              }}
+            />
+          </div>
           <p className="hint">
-            {t("Folder in the container: {dir}. Which disk or share that is, is set in docker.yaml (WIKI_BACKUPS).", {
-              dir: target.localDir,
-            })}
+            {t(
+              "Empty: the default folder {dir}. Another folder must lie inside {roots}, already exist and belong to the user the wiki runs as — a disk or NAS share is mounted there in docker.yaml.",
+              { dir: target.localDefault, roots: target.localRoots.join(", ") || "—" },
+            )}
           </p>
           {target.sameVolume && (
             <div className="notice">
               <div>
                 {t(
-                  "The backups are on the same volume as the wiki. If that disk fails, both are gone: point WIKI_BACKUPS at another disk or a NAS share, or use S3.",
+                  "The backups are on the same volume as the wiki. If that disk fails, both are gone: choose a folder on another disk or a NAS share, or use S3.",
                 )}
               </div>
             </div>
@@ -809,6 +851,9 @@ function StoragePanel({
             {t("Path-style addresses (MinIO, Garage, most self-hosted servers)")}
           </label>
         </div>
+      )}
+      {isOwner && changed && (
+        <p className="hint">{t("Existing backups stay where they are and show up again when you switch back.")}</p>
       )}
       {isOwner && changed && (
         <form

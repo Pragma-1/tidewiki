@@ -18,8 +18,10 @@ import { LegalEditor } from "@/components/legal-editor";
 import { MediaPanel } from "@/components/media-panel";
 import { DataPanel } from "@/components/data-panel";
 import { BackupsPanel } from "@/components/backups-panel";
-import { hasS3Secret, listBackups, LOCAL_BACKUP_DIR } from "@/lib/backup";
-import { DATA_DIR } from "@/lib/config";
+import { backupRoots, DEFAULT_BACKUP_DIR, hasS3Secret, listBackups, localBackupDir } from "@/lib/backup";
+import { HttpError } from "@/lib/validate";
+import { DATA_DIR, LIMITS } from "@/lib/config";
+import { getTree, type TreeNode } from "@/lib/pages";
 import { formatDate } from "@/lib/i18n";
 import { getLang } from "@/lib/i18n-server";
 import { statSync } from "node:fs";
@@ -145,7 +147,19 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             </>
           );
         })())}
-      {tab === "data" && <DataPanel />}
+      {tab === "data" &&
+        (await (async () => {
+          // existing pages a part of an import can be put under, in tree order with their level
+          const flat: { id: number; title: string; depth: number }[] = [];
+          const walk = (ns: TreeNode[], d: number) => {
+            for (const n of ns) {
+              flat.push({ id: n.id, title: n.title, depth: d });
+              walk(n.children, d + 1);
+            }
+          };
+          walk(await getTree(), 1);
+          return <DataPanel pages={flat} maxDepth={LIMITS.maxPageDepth} />;
+        })())}
       {tab === "backups" &&
         (await (async () => {
           const lang = await getLang();
@@ -161,7 +175,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           try {
             list = await listBackups();
           } catch (e) {
-            error = e instanceof Error ? e.message.slice(0, 200) : "unknown";
+            // only our own, translatable messages reach the page; anything else is in the server log
+            if (!(e instanceof HttpError)) console.error("[backup] list:", e instanceof Error ? e.message : e);
+            error = e instanceof HttpError ? e.message : "";
           }
           const items = (list?.items ?? []).map((b) => ({
             id: b.id,
@@ -172,7 +188,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             media_count: b.media_count,
             counts: b.counts,
           }));
-          const bd = dev(LOCAL_BACKUP_DIR());
+          const localDir = localBackupDir(cfg);
+          const bd = dev(localDir);
           return (
             <>
               <SettingsPanel
@@ -186,14 +203,16 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                   unreadable={list?.unreadable ?? 0}
                   listError={error}
                   isOwner={user.isOwner}
+                  enabled={cfg.backup_enabled}
                   target={{
                     kind: cfg.backup_target,
                     where:
                       list?.where ??
-                      (cfg.backup_target === "s3"
-                        ? `s3://${cfg.backup_s3_bucket}/${cfg.backup_s3_prefix}`
-                        : LOCAL_BACKUP_DIR()),
-                    localDir: LOCAL_BACKUP_DIR(),
+                      (cfg.backup_target === "s3" ? `s3://${cfg.backup_s3_bucket}/${cfg.backup_s3_prefix}` : localDir),
+                    localDir,
+                    localDefault: DEFAULT_BACKUP_DIR(),
+                    localCustom: cfg.backup_local_dir,
+                    localRoots: backupRoots(),
                     sameVolume: cfg.backup_target === "local" && bd !== null && bd === dev(DATA_DIR),
                     // connection details only for the owner
                     s3: user.isOwner

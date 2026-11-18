@@ -1,9 +1,19 @@
 import { randomBytes } from "node:crypto";
 import { waitForDrain } from "./stream-util";
-import { createWriteStream, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  createWriteStream,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { DATA_DIR } from "./config";
-import { all, one, run, sql, now } from "./db";
+import { all, one, run, sql, now, tx, wipe } from "./db";
 import { HttpError } from "./validate";
 
 export const MEDIA_DIR = () => path.join(/* turbopackIgnore: true */ DATA_DIR, "media");
@@ -383,22 +393,138 @@ async function storeUploadInner(
 
 export const getMediaByName = (name: string) => one<MediaRow>(sql`SELECT * FROM media WHERE name = ${name}`);
 
-export function listMedia() {
-  return all<MediaRow & { username: string | null; used_in: number }>(
-    sql`SELECT m.*, u.username,
-          (SELECT COUNT(*) FROM pages p WHERE strpos(p.content, m.name) > 0) AS used_in
-        FROM media m LEFT JOIN users u ON u.id = m.created_by ORDER BY m.id DESC`,
+/** A stored file name as it appears in page text (`/media/<name>`). */
+const NAME_IN_TEXT = "/media/([A-Za-z0-9_-]{16,40}[.](?:png|jpg|gif|webp|mp4|webm|ogv|mov))";
+const FILE_NAME = /^[A-Za-z0-9_-]{16,40}\.(?:png|jpg|gif|webp|mp4|webm|ogv|mov)$/;
+
+export type ListedMedia = MediaRow & {
+  username: string | null;
+  /** pages showing it now */
+  used_in: number;
+  /** deleted pages in the trash that show it (they'd show a gap after a restore) */
+  in_trash: number;
+  /** only older versions of pages show it */
+  in_history: boolean;
+};
+
+/**
+ * Every file with where it is used. Each text is scanned once for /media/… references (not once
+ * per file), so this stays quick with many files and long histories.
+ */
+export async function listMedia(): Promise<ListedMedia[]> {
+  return all<ListedMedia>(
+    sql`WITH cur AS (
+          SELECT m[1] AS name, COUNT(DISTINCT p.id) AS n
+          FROM pages p, regexp_matches(p.content, ${NAME_IN_TEXT}, 'g') m GROUP BY m[1]
+        ), bin AS (
+          SELECT m[1] AS name, COUNT(DISTINCT t.id) AS n
+          FROM trash t, regexp_matches(t.content, ${NAME_IN_TEXT}, 'g') m GROUP BY m[1]
+        ), hist AS (
+          SELECT DISTINCT m[1] AS name FROM page_revisions r, regexp_matches(r.content, ${NAME_IN_TEXT}, 'g') m
+          UNION
+          SELECT DISTINCT m[1] FROM trash_revisions r, regexp_matches(r.content, ${NAME_IN_TEXT}, 'g') m
+        )
+        SELECT m.*, u.username, COALESCE(cur.n, 0) AS used_in, COALESCE(bin.n, 0) AS in_trash,
+               (hist.name IS NOT NULL AND cur.n IS NULL AND bin.n IS NULL) AS in_history
+        FROM media m
+        LEFT JOIN users u ON u.id = m.created_by
+        LEFT JOIN cur ON cur.name = m.name
+        LEFT JOIN bin ON bin.name = m.name
+        LEFT JOIN hist ON hist.name = m.name
+        ORDER BY m.id DESC`,
   );
 }
 
+/** Removes the files of deleted rows from disk, then the rows from the database files (see wipe). */
+async function removeFiles(rows: MediaRow[]) {
+  for (const m of rows)
+    if (FILE_NAME.test(m.name)) rmSync(path.join(/* turbopackIgnore: true */ MEDIA_DIR(), m.name), { force: true });
+  if (rows.length) await wipe(["media"]);
+}
+
+/**
+ * Deletes files for good: the database row, the file on disk, and the row's traces in the
+ * database files. Uploaders may delete their own files, administrators any. All or nothing.
+ */
+export async function deleteMediaMany(ids: number[], actor: { id: number; role: string }): Promise<MediaRow[]> {
+  const rows = await tx(async () => {
+    const found = await all<MediaRow>(sql`SELECT * FROM media WHERE id = ANY(${ids}::bigint[]) FOR UPDATE`);
+    if (actor.role !== "admin" && found.some((m) => m.created_by !== actor.id))
+      throw new HttpError(403, "Only the uploader or an administrator can delete this file.");
+    await deleteRows(found.map((m) => m.id));
+    return found;
+  });
+  await removeFiles(rows);
+  return rows;
+}
+const deleteRows = (ids: number[]) => run(sql`DELETE FROM media WHERE id = ANY(${ids}::bigint[])`);
+
 export async function deleteMedia(id: number, actor: { id: number; role: string }) {
-  const m = await one<MediaRow>(sql`SELECT * FROM media WHERE id = ${id}`);
+  const [m] = await deleteMediaMany([id], actor);
   if (!m) throw new HttpError(404, "File not found.");
-  if (actor.role !== "admin" && m.created_by !== actor.id)
-    throw new HttpError(403, "Only the uploader or an administrator can delete this file.");
-  await run(sql`DELETE FROM media WHERE id = ${id}`);
-  rmSync(path.join(/* turbopackIgnore: true */ MEDIA_DIR(), m.name), { force: true });
   return m;
+}
+
+/**
+ * Deletes every file no page and no page in the trash shows (files only older versions show are
+ * deleted too — those versions then show a gap). Also removes stray files on disk that have no
+ * entry (left over by a crash) and abandoned partial uploads. Administrators only.
+ */
+export async function deleteUnusedMedia(): Promise<{ files: MediaRow[]; strays: number; bytes: number }> {
+  const unused = (await listMedia()).filter((m) => m.used_in === 0 && m.in_trash === 0).map((m) => m.id);
+  const files = unused.length
+    ? await tx(async () => {
+        // checked again under the lock: a page saved meanwhile may use one of them now
+        const rows = await all<MediaRow>(
+          sql`SELECT * FROM media m WHERE m.id = ANY(${unused}::bigint[])
+                AND NOT EXISTS (SELECT 1 FROM pages p WHERE strpos(p.content, '/media/' || m.name) > 0)
+                AND NOT EXISTS (SELECT 1 FROM trash t WHERE strpos(t.content, '/media/' || m.name) > 0)
+              FOR UPDATE`,
+        );
+        if (rows.length) await deleteRows(rows.map((r) => r.id));
+        return rows;
+      })
+    : [];
+  await removeFiles(files);
+  const strays = await sweepMediaDir();
+  return { files, strays: strays.count, bytes: files.reduce((a, m) => a + m.size, 0) + strays.bytes };
+}
+
+/**
+ * Files in the media folder that nothing points to: a file without a database entry (older than
+ * 10 minutes, so an upload in progress is never touched), an abandoned partial upload (older than
+ * an hour). Called by "delete unused" and the hourly job.
+ */
+export async function sweepMediaDir(): Promise<{ count: number; bytes: number }> {
+  const dir = MEDIA_DIR();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { count: 0, bytes: 0 };
+  }
+  const known = new Set((await all<{ name: string }>(sql`SELECT name FROM media`)).map((r) => r.name));
+  const nowMs = Date.now();
+  let count = 0,
+    bytes = 0;
+  for (const n of names) {
+    const f = path.join(/* turbopackIgnore: true */ dir, n);
+    let st;
+    try {
+      st = lstatSync(f);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue; // folders (.import) and links are never touched
+    const age = nowMs - st.mtimeMs;
+    const stray =
+      (FILE_NAME.test(n) && !known.has(n) && age > 10 * 60_000) || (n.startsWith(".upload-") && age > 3600_000);
+    if (!stray) continue;
+    rmSync(f, { force: true });
+    count++;
+    bytes += st.size;
+  }
+  return { count, bytes };
 }
 
 export const mediaUsage = async () => ({ used: await usedBytes(), quota: LIMITS.quota });

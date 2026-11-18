@@ -11,7 +11,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { getLang } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
 import { SLUG_RE } from "@/lib/validate";
-import { getSettings } from "@/lib/settings";
+import { getSettings, renderSettings } from "@/lib/settings";
 export const dynamic = "force-dynamic";
 
 type Props = { params: Promise<{ slug: string }>; searchParams?: Promise<{ moved?: string }> };
@@ -49,7 +49,7 @@ export default async function WikiPage({ params, searchParams }: Props) {
   const t = makeT(lang);
   const { html, toc } = renderMarkdown(page.content, {
     lang,
-    autoloadExternal: (await getSettings()).external_media_autoload,
+    ...renderSettings(await getSettings()),
   });
   return (
     <Shell active={page.slug} rev={page.rev}>

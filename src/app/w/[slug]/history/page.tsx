@@ -10,7 +10,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT, type T } from "@/lib/i18n";
 import { SLUG_RE } from "@/lib/validate";
-import { getSettings } from "@/lib/settings";
+import { getSettings, renderSettings } from "@/lib/settings";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
   return { title: (await getT())("History") };
@@ -274,7 +274,7 @@ export default async function History({
                 dangerouslySetInnerHTML={{
                   __html: renderMarkdown(wanted.content, {
                     lang,
-                    autoloadExternal: (await getSettings()).external_media_autoload,
+                    ...renderSettings(await getSettings()),
                   }).html,
                 }}
               />

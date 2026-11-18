@@ -127,7 +127,7 @@ export async function uniqueSlug(base: string): Promise<string> {
 }
 
 /** Levels above and including `id` (1 = top level). One recursive query, capped. */
-async function depthOf(id: number | null): Promise<number> {
+export async function depthOf(id: number | null): Promise<number> {
   if (!id) return 0;
   const r = await one<{ d: number }>(
     sql`WITH RECURSIVE up(id, parent_id, d) AS (
@@ -152,9 +152,41 @@ export async function assertParentOk(pageId: number | null, parentId: number | n
     );
     if (cyc) throw new HttpError(400, "A page can’t be moved inside itself.", "parentId");
   }
-  if ((await depthOf(parentId)) >= LIMITS.maxPageDepth)
+  // the page brings its own sub-pages along: the deepest of them must still fit
+  const below = pageId === null ? 0 : await heightBelow(pageId);
+  if ((await depthOf(parentId)) + below >= LIMITS.maxPageDepth)
     throw new HttpError(400, `Chapters can be nested ${LIMITS.maxPageDepth} levels deep at most.`, "parentId");
 }
+
+/** How many levels of sub-pages hang below `id` (0 = none). Capped like depthOf. */
+async function heightBelow(id: number): Promise<number> {
+  const r = await one<{ d: number }>(
+    sql`WITH RECURSIVE down(id, d) AS (
+          SELECT id, 1 FROM pages WHERE parent_id = ${id}
+          UNION ALL SELECT p.id, down.d + 1 FROM pages p JOIN down ON p.parent_id = down.id WHERE down.d < 21
+        ) SELECT COALESCE(MAX(d), 0) AS d FROM down`,
+  );
+  return r?.d ?? 0;
+}
+
+export type ListedPage = {
+  id: number;
+  slug: string;
+  title: string;
+  parent_id: number | null;
+  created_by: number | null;
+  author: string | null;
+  updated_at: number;
+  rev: number;
+};
+
+/** Every page with what the page manager shows; tree order (position, then title). */
+export const listPages = () =>
+  all<ListedPage>(
+    sql`SELECT p.id, p.slug, p.title, p.parent_id, p.created_by, u.username AS author, p.updated_at, p.rev
+        FROM pages p LEFT JOIN users u ON u.id = p.created_by
+        ORDER BY p.position, lower(p.title), p.id`,
+  );
 
 export async function createPage(input: {
   title: string;

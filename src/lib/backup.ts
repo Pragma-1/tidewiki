@@ -22,11 +22,11 @@ import { all, one, run, sql, syncIdentity, tx, now, type Sql } from "./db";
 import { SCHEMA_VERSION } from "./schema";
 import { decrypt, encrypt } from "./crypto";
 import { MEDIA_DIR } from "./media";
-import { getSettings } from "./settings";
+import { getSettings, type Settings } from "./settings";
 import { HttpError } from "./validate";
 import { waitForDrain } from "./stream-util";
 import { decryptStream, encryptStream, objectName, openBuffer, sealBuffer } from "./backup-crypto";
-import { KEY_RE, LocalStore, S3Store, type BackupStore, type S3Config } from "./backup-store";
+import { checkLocalDir, KEY_RE, LocalStore, S3Store, type BackupStore, type S3Config } from "./backup-store";
 import { reindexAll, flushIndex } from "./search";
 import { rebuildLinks, updatePage } from "./pages";
 import { reinsertPage } from "./trash";
@@ -49,8 +49,39 @@ import { reapplyErasures } from "./admin";
  * signs everyone out), and the search and link indexes (rebuilt after a restore).
  */
 
-export const LOCAL_BACKUP_DIR = () =>
+/** The folder backups go to unless the owner picked another one: the `/backups` mount in Docker. */
+export const DEFAULT_BACKUP_DIR = () =>
   process.env.WIKI_BACKUP_DIR || path.join(/* turbopackIgnore: true */ DATA_DIR, "backups");
+
+/**
+ * Where the owner may point backups in the settings: inside these folders only (an allow-list, so
+ * a typo or a stolen owner session can't aim the wiki at arbitrary places). Docker mounts other
+ * disks and shares there; WIKI_BACKUP_ROOTS replaces the list.
+ */
+export function backupRoots(): string[] {
+  const raw = process.env.WIKI_BACKUP_ROOTS;
+  const list = raw ? raw.split(",") : ["/backups", "/mnt", "/media", "/srv", DEFAULT_BACKUP_DIR()];
+  const out = new Set<string>();
+  for (const r of list.map((x) => x.trim().replace(/(.)\/+$/, "$1"))) {
+    if (r.startsWith("/") && r !== "/" && path.posix.normalize(r) === r) out.add(r);
+  }
+  return [...out];
+}
+
+/** The folder the "local" target writes to right now. */
+export const localBackupDir = (s: Pick<Settings, "backup_local_dir">) => s.backup_local_dir || DEFAULT_BACKUP_DIR();
+
+/** A store for a folder: the default one, or one the owner chose (which must already exist). */
+export const localStore = (dir: string) => new LocalStore(dir, { mustExist: dir !== DEFAULT_BACKUP_DIR() });
+
+/** Validates a folder typed by the owner ("" = the default folder). */
+export function checkBackupDir(input: unknown): string {
+  if (typeof input === "string" && (input.trim() === "" || input.trim() === DEFAULT_BACKUP_DIR())) return "";
+  return checkLocalDir(input, {
+    roots: backupRoots(),
+    avoid: [path.resolve(DATA_DIR), path.resolve(/* turbopackIgnore: true */ process.cwd())],
+  });
+}
 const ID_RE = /^\d{8}-\d{6}-[0-9a-f]{6}$/;
 const MEDIA_NAME = /^[A-Za-z0-9_-]{16,40}\.(?:png|jpg|gif|webp|mp4|webm|ogv|mov)$/;
 const KEEP_SAFETY = 5;
@@ -217,7 +248,7 @@ export async function backupStore(): Promise<BackupStore> {
   if (g.__wikiStoreOverride) return g.__wikiStoreOverride;
   const s = await getSettings();
   if (s.backup_target === "s3") return new S3Store(await s3ConfigFromSettings());
-  return new LocalStore(LOCAL_BACKUP_DIR());
+  return localStore(localBackupDir(s));
 }
 
 /* ------------------------------------------------------------------- lock */

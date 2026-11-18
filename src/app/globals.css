@@ -19,6 +19,11 @@
   --accent-2: #7a8ca5;
   --hl: #f6ead2;
   --hl-strong: #b7802a;
+  /* text selection: see-through, so it shows on every background … */
+  --sel: rgb(61 90 128 / 0.3);
+  /* … except tinted ones (warning, danger, marked text): see-through blue over beige or pink turns
+     a dull grey that's barely visible, so there it is a solid blue */
+  --sel-solid: #a9c1e4;
   --danger: #b3261e;
   --danger-soft: #fbeceb;
   --ok: #2f6f4f;
@@ -50,6 +55,8 @@ html[data-theme="dark"] {
   --accent-2: #7c8da5;
   --hl: #3e321b;
   --hl-strong: #e0b25a;
+  --sel: rgb(142 174 219 / 0.38);
+  --sel-solid: #3b5884;
   --danger: #f08a80;
   --danger-soft: #3a1f1d;
   --ok: #7cc49e;
@@ -79,6 +86,8 @@ html[data-theme="dark"] {
     --accent-2: #7c8da5;
     --hl: #3e321b;
     --hl-strong: #e0b25a;
+    --sel: rgb(142 174 219 / 0.38);
+    --sel-solid: #3b5884;
     --danger: #f08a80;
     --danger-soft: #3a1f1d;
     --ok: #7cc49e;
@@ -129,7 +138,16 @@ a:hover {
   border-radius: 4px;
 }
 ::selection {
-  background: var(--hl);
+  background: var(--sel);
+  color: var(--ink);
+}
+.callout-warning::selection,
+.callout-warning ::selection,
+.callout-danger::selection,
+.callout-danger ::selection,
+mark::selection,
+mark ::selection {
+  background: var(--sel-solid);
   color: var(--ink);
 }
 .sr-only {
@@ -2716,4 +2734,176 @@ dialog.confirm-dlg.wide-dlg {
   align-items: center;
   gap: 0.4rem;
   margin-top: 0.8rem;
+}
+
+/* page manager: multi-select and delete */
+.pm-bar {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.8rem;
+  padding: 0.6rem 0.7rem;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow);
+}
+.pm-search {
+  position: relative;
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.pm-search svg {
+  position: absolute;
+  left: 0.65rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-2);
+  pointer-events: none;
+}
+.pm-search .input {
+  padding-left: 2.1rem;
+  width: 100%;
+}
+.pm-count {
+  color: var(--ink-2);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+.pm-table .pm-check {
+  width: 2.4rem;
+  padding-right: 0;
+}
+.pm-table input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.pm-table input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+.pm-table tr.pm-on td {
+  background: var(--accent-soft);
+}
+.pm-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 550;
+}
+.pm-confirm-list {
+  margin: 0 0 0.6rem;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+@media (max-width: 720px) {
+  .pm-hide-sm {
+    display: none;
+  }
+}
+
+/* import: arranging the pages before importing */
+.imp-tree {
+  list-style: none;
+  margin: 0.8rem 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--sheet);
+  max-height: 34rem;
+  overflow: auto;
+}
+.imp-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.7rem 0.45rem calc(0.7rem + var(--lvl, 0) * 1.6rem);
+  border-bottom: 1px solid var(--line-2);
+}
+.imp-row:last-child {
+  border-bottom: 0;
+}
+.imp-row input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--accent);
+}
+.imp-row.off .imp-main,
+.imp-row.off .badge {
+  opacity: 0.5;
+}
+.imp-row.deep {
+  background: var(--danger-soft);
+}
+.imp-main {
+  min-width: 0;
+}
+.imp-title {
+  width: 100%;
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
+}
+.imp-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 0.15rem;
+}
+.imp-btns {
+  display: flex;
+  gap: 0.15rem;
+}
+.imp-btns .icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.imp-fixed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+.imp-anchor {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.7rem;
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-2);
+}
+@media (max-width: 720px) {
+  .imp-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding-left: calc(0.6rem + var(--lvl, 0) * 0.9rem);
+  }
+  .imp-btns {
+    grid-column: 2 / -1;
+    flex-wrap: wrap;
+  }
+}
+
+/* settings: two columns that fill independently (no gap under a short panel) */
+.settings-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+@media (max-width: 1240px) {
+  .settings-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

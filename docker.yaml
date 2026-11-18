@@ -52,6 +52,9 @@ services:
       - ${WIKI_DATA:-./data}:/data
       # Backups (encrypted). Another disk, or a NAS share — see "volumes" below for NFS/SMB.
       - ${WIKI_BACKUPS:-./backups}:/backups
+      # More places to choose from in Einstellungen → Sicherungen (folders under /backups, /mnt,
+      # /media or /srv; the folder must belong to PUID:PGID), for example:
+      # - /mnt/nas/wiki-backups:/mnt/nas
     networks: [backend, frontend]
 
 networks:

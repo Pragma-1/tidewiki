@@ -120,6 +120,9 @@ const JUNK = [
   { a: { b: { c: { d: { e: {} } } } } },
 ];
 const KEYS = [
+  "slugs",
+  "token",
+  "layout",
   "username",
   "password",
   "email",
@@ -203,6 +206,10 @@ async function run() {
     ["GET", "/api/backups/20260101-000000-abcdef/download", 401],
     ["POST", "/api/backups/20260101-000000-abcdef/restore", 401],
     ["DELETE", "/api/backups/20260101-000000-abcdef", 401],
+    ["DELETE", "/api/pages", 401],
+    ["POST", "/api/import/apply", 401],
+    ["DELETE", "/api/media", 401],
+    ["POST", "/api/media/unused", 401],
   ]) {
     const r = await anon.req(m, p, { body: m === "GET" ? undefined : {} });
     ok(r.status === want, `${m} ${p} -> ${r.status} (want ${want})`);
@@ -278,6 +285,10 @@ async function run() {
     ["GET", "/api/audit?q=%00%ff&category=__proto__&user=-1&from=1e999&before=NaN&limit=-5"],
     ["GET", "/api/search?q=%F0%9F%92%A9%00&x=%00"],
     ["POST", "/api/trash/abc/restore"],
+    ["DELETE", "/api/pages"],
+    ["POST", "/api/import/apply"],
+    ["DELETE", "/api/media"],
+    ["POST", "/api/media/unused"],
     ["POST", "/api/backups/..%2F..%2Fwiki/restore"],
     ["GET", "/api/backups/%2e%2e%2fpool/download"],
   ];
@@ -393,6 +404,8 @@ async function run() {
         ["GET", "/api/trash"],
         ["POST", "/api/trash/0/restore"],
         ["POST", "/api/backups/00000000-000000-000000/restore"],
+        // without a valid preview token nothing is imported
+        ["POST", "/api/import/apply"],
         ...(isAdmin ? [["POST", "/api/settings/mail-test"]] : []),
       ];
       for (const [m, p] of SAFE) {
@@ -412,6 +425,7 @@ async function run() {
           ["POST", "/api/pages"],
           ["PUT", "/api/settings"],
           ["POST", "/api/users"],
+          ["DELETE", "/api/pages"], // junk slugs: only junk pages could ever match
         ]) {
           for (let i = 0; i < 10; i++) {
             const raw = JSON.stringify(

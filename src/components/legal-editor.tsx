@@ -17,7 +17,10 @@ export function LegalEditor({ pages, missing }: { pages: Status[]; missing: stri
   const t = useT();
   const date = useDate();
   const lang: Lang = useLang();
-  const [status, setStatus] = useState(pages);
+  // which pages exist comes from the server (it follows the switches above after a refresh);
+  // only what was just saved or reset here is kept locally on top of it
+  const [marks, setMarks] = useState<Partial<Record<Status["key"], Partial<Record<Lang, number | null>>>>>({});
+  const status = pages.map((p) => (marks[p.key] ? { ...p, custom: { ...p.custom, ...marks[p.key] } } : p));
   const [open, setOpen] = useState<Status["key"] | null>(null);
   const [text, setText] = useState("");
   const toast = useToast();
@@ -39,7 +42,7 @@ export function LegalEditor({ pages, missing }: { pages: Status[]; missing: stri
     setOpen(key);
   };
   const mark = (key: Status["key"], v: number | null) =>
-    setStatus((cur) => cur.map((p) => (p.key === key ? { ...p, custom: { ...p.custom, [lang]: v } } : p)));
+    setMarks((cur) => ({ ...cur, [key]: { ...cur[key], [lang]: v } }));
   const save = async () => {
     if (!open) return;
     setBusy(true);

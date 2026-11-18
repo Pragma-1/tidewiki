@@ -1,5 +1,16 @@
 import Link from "next/link";
-import { BookOpen, ChevronRight, FilePlus2, FileUp, History, Settings, Trash2, UserRound, LogIn } from "lucide-react";
+import {
+  BookOpen,
+  ChevronRight,
+  FilePlus2,
+  FileUp,
+  History,
+  ListChecks,
+  LogIn,
+  Settings,
+  Trash2,
+  UserRound,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { getCurrentUser } from "@/lib/session-cookie";
 import { getSettings } from "@/lib/settings";
@@ -130,6 +141,12 @@ export async function Shell({
                 </Link>
               )}
               {canEdit && (
+                <Link className="rail-link" href="/pages">
+                  <ListChecks size={15} aria-hidden />
+                  {t("Manage pages")}
+                </Link>
+              )}
+              {canEdit && (
                 <Link className="rail-link" href="/trash">
                   <Trash2 size={15} aria-hidden />
                   {t("Trash")}
@@ -149,7 +166,15 @@ export async function Shell({
       </div>
       <footer className="site-foot">
         <nav aria-label={t("Legal")}>
-          <Link href="/privacy">{t("Privacy")}</Link>
+          {cfg.legal_privacy_enabled ? (
+            <Link href="/privacy">{t("Privacy")}</Link>
+          ) : (
+            cfg.legal_privacy_url && (
+              <a href={cfg.legal_privacy_url} rel="noopener noreferrer">
+                {t("Privacy")}
+              </a>
+            )
+          )}
           {cfg.legal_terms_enabled && <Link href="/terms">{t("Terms of use")}</Link>}
           {cfg.legal_imprint_enabled && <Link href="/imprint">{t("Imprint")}</Link>}
         </nav>

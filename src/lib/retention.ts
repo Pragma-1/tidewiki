@@ -1,8 +1,9 @@
-import { run, sql, now } from "./db";
+import { run, sql, now, wipe, type WipeTable } from "./db";
 import { getSettings } from "./settings";
 import { purgeLockouts } from "./lockout";
 import { purgeRateLimits } from "./rate-limit";
 import { purgeOldTrash } from "./trash";
+import { sweepMediaDir } from "./media";
 
 /**
  * Storage limitation (Art. 5(1)(e) GDPR): IP addresses in the security log are removed after
@@ -23,11 +24,18 @@ export async function purgeExpired() {
     trash: await purgeOldTrash(),
   };
   // Old IPs also live on in the session table (shown to the user as "active sessions").
-  await run(
+  const sessionIps = await run(
     sql`UPDATE sessions SET ip = NULL WHERE ip IS NOT NULL AND created_at < ${t - cfg.ip_retention_days * 86400}`,
   );
   await purgeRateLimits();
   await purgeLockouts();
+  await sweepMediaDir(); // files a crash left behind without an entry
+  // expired IPs and entries leave the database files too; also retries wipes that had to wait
+  const tables: WipeTable[] = [];
+  if (r.ips || r.entries) tables.push("audit_log");
+  if (sessionIps || r.sessions) tables.push("sessions");
+  if (r.resets) tables.push("reset_tokens");
+  await wipe(tables);
   return r;
 }
 

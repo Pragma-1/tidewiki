@@ -298,21 +298,77 @@ const VACUUMABLE = [
   "trash_revisions",
   "pages",
   "page_revisions",
+  "page_links",
   "search_idx",
+  "search_dirty",
   "media",
 ] as const;
+export type WipeTable = (typeof VACUUMABLE)[number];
+
+const WIPE_KEY = "wipe_pending";
+const gw = globalThis as unknown as { __wikiWipe?: Promise<void> };
 
 /**
- * Best effort: removes dead rows right away (after an erasure or a purge) instead of whenever
- * autovacuum gets to it. Must run outside a transaction; never fails the request.
+ * Removes deleted rows from the database files for good, after an erasure, a final deletion or
+ * a deleted file. A DELETE only marks a row dead, and a plain VACUUM only marks its space as
+ * reusable — the old bytes stay in the table file until something overwrites them (checked in
+ * tests/wipe.test.ts). VACUUM FULL writes the table into a new file and removes the old one.
+ *
+ * It needs the table to itself for a moment. So it waits at most 2 s for that (readers queue
+ * behind it meanwhile) and otherwise leaves the table on a persistent to-do list that the hourly
+ * job (and the next wipe) works through — nothing is forgotten across restarts. Runs one at a
+ * time, after the surrounding transaction, and never fails the request.
  */
-export async function vacuum(tables: readonly (typeof VACUUMABLE)[number][]) {
-  if (inTx()) return;
-  try {
-    for (const t of tables) await pool().query(compile(sql`VACUUM ${sql.ident(t, VACUUMABLE)}`).text);
-  } catch (e) {
-    console.error("[db] vacuum:", e instanceof Error ? e.message : e);
+export function wipe(tables: readonly WipeTable[]): Promise<void> {
+  if (inTx()) {
+    const list = [...tables];
+    afterCommit(() => void wipe(list));
+    return Promise.resolve();
   }
+  const run = async () => {
+    const todo = new Set<WipeTable>(tables);
+    try {
+      const r = await pool().query<{ value: string }>("SELECT value FROM settings WHERE key = $1", [WIPE_KEY]);
+      for (const t of JSON.parse(r.rows[0]?.value ?? "[]") as unknown[])
+        if ((VACUUMABLE as readonly unknown[]).includes(t)) todo.add(t as WipeTable);
+    } catch {
+      /* no list yet */
+    }
+    const left: WipeTable[] = [];
+    for (const t of todo) {
+      const c = await pool().connect();
+      try {
+        await c.query("SET lock_timeout = '2s'");
+        await c.query("SET statement_timeout = '15min'");
+        await c.query(compile(sql`VACUUM (FULL, ANALYZE) ${sql.ident(t, VACUUMABLE)}`).text);
+      } catch (e) {
+        left.push(t);
+        if (pgCode(e) !== "55P03") console.error("[db] wipe:", t, e instanceof Error ? e.message : e);
+      } finally {
+        await c.query("RESET lock_timeout; RESET statement_timeout").catch(() => {});
+        c.release();
+      }
+    }
+    try {
+      if (left.length)
+        await pool().query(
+          "INSERT INTO settings(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+          [WIPE_KEY, JSON.stringify(left)],
+        );
+      else await pool().query("DELETE FROM settings WHERE key = $1", [WIPE_KEY]);
+    } catch (e) {
+      console.error("[db] wipe list:", e instanceof Error ? e.message : e);
+    }
+  };
+  const next = (gw.__wikiWipe ?? Promise.resolve()).then(run, run);
+  gw.__wikiWipe = next;
+  return next;
+}
+
+/** Tables still waiting for a wipe (for the hourly job and the tests). */
+export async function pendingWipes(): Promise<WipeTable[]> {
+  const r = await pool().query<{ value: string }>("SELECT value FROM settings WHERE key = $1", [WIPE_KEY]);
+  return r.rows[0] ? (JSON.parse(r.rows[0].value) as WipeTable[]) : [];
 }
 
 /** PostgreSQL error code, if any (23505 = unique violation, …). */

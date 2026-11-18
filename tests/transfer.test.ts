@@ -7,7 +7,16 @@ import * as auth from "@/lib/auth";
 import { db } from "./pg";
 import { createPage, getPage, getTree, backlinks, recentChanges, readingOrder, updatePage } from "@/lib/pages";
 import { storeUpload } from "@/lib/media";
-import { exportWikiZip, importArchive, IMPORT_LIMITS, parseFrontMatter, toMarkdownFile } from "@/lib/transfer";
+import {
+  dropStaged,
+  exportWikiZip,
+  importArchive,
+  IMPORT_LIMITS,
+  parseFrontMatter,
+  stagedUpload,
+  stageUpload,
+  toMarkdownFile,
+} from "@/lib/transfer";
 import { verifyPassword, hashPassword } from "@/lib/password";
 import { queryAudit } from "@/lib/audit";
 
@@ -114,6 +123,153 @@ describe("export → import round trip", () => {
     expect(p.pages[0]).toMatchObject({ title: "Neu", action: "create" });
     expect(p.media).toBe(1);
     expect(await db().prepare("SELECT COUNT(*) n FROM pages").get()).toEqual(before);
+  });
+});
+
+describe("arranging an import", () => {
+  const files = {
+    "handbuch/index.md": "# Handbuch",
+    "handbuch/start.md": "# Start",
+    "handbuch/netz/index.md": "# Netz",
+    "handbuch/netz/vlan.md": "# VLAN",
+    "notizen.md": "# Notizen",
+  };
+  const layoutOf = (pages: { key: string; parentKey: string | null }[]) =>
+    pages.map((p) => ({ key: p.key, parent: p.parentKey, include: true }));
+
+  it("reorders, promotes, demotes, renames and leaves out pages; siblings keep the chosen order", async () => {
+    const z = tmp("arr.zip", zip(files));
+    const prev = await importArchive(z, { apply: false, conflict: "skip", userId: uid });
+    expect(prev.pages.map((p) => p.key)).toEqual([
+      "handbuch",
+      "notizen",
+      "handbuch/netz",
+      "handbuch/start",
+      "handbuch/netz/vlan",
+    ]);
+    const layout = [
+      { key: "notizen", parent: null, include: true, title: "  Notizen   & Ideen " }, // first, renamed
+      { key: "handbuch", parent: null, include: true },
+      { key: "handbuch/start", parent: "handbuch", include: true },
+      { key: "handbuch/netz", parent: "handbuch", include: false }, // left out …
+      { key: "handbuch/netz/vlan", parent: "handbuch/netz", include: true }, // … its child moves up
+    ];
+    const r = await importArchive(z, { apply: true, conflict: "skip", userId: uid, layout });
+    expect(r).toMatchObject({ created: 4, excluded: 1 });
+    expect(await getPage("netz")).toBeUndefined();
+    const hb = (await getPage("handbuch"))!;
+    expect((await getPage("vlan"))!.parent_id).toBe(hb.id);
+    expect((await getPage("notizen"))!.title).toBe("Notizen & Ideen");
+    const tree = await getTree();
+    const roots = tree.map((n) => n.slug);
+    expect(roots.indexOf("notizen")).toBeLessThan(roots.indexOf("handbuch"));
+    expect(tree.find((n) => n.slug === "handbuch")!.children.map((c) => c.slug)).toEqual(["start", "vlan"]);
+  });
+
+  it("puts pages under an existing wiki page, within the nesting limit", async () => {
+    const host = await createPage({ title: "Ziel Kapitel", content: "", parentId: null, userId: uid });
+    const z = tmp("arr2.zip", zip({ "a/index.md": "# Arr A", "a/b.md": "# Arr B" }));
+    const r = await importArchive(z, {
+      apply: true,
+      conflict: "copy",
+      userId: uid,
+      layout: [
+        { key: "a", parent: `page:${host.id}`, include: true },
+        { key: "a/b", parent: "a", include: true },
+      ],
+    });
+    expect(r.created).toBe(2);
+    const a = (await getPage("a"))!;
+    expect(a.parent_id).toBe(host.id);
+    expect((await getPage("b"))!.parent_id).toBe(a.id);
+    // one level deeper and B would be on level 4: refused as a whole, nothing written
+    const sub = await createPage({ title: "Ziel Unter", content: "", parentId: host.id, userId: uid });
+    const before = (await db().prepare("SELECT COUNT(*) n FROM pages").get()) as { n: number };
+    await expect(
+      importArchive(tmp("arr3.zip", zip({ "c/index.md": "# Arr C", "c/d.md": "# Arr D" })), {
+        apply: true,
+        conflict: "copy",
+        userId: uid,
+        layout: [
+          { key: "c", parent: `page:${sub.id}`, include: true },
+          { key: "c/d", parent: "c", include: true },
+        ],
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await db().prepare("SELECT COUNT(*) n FROM pages").get()).toEqual(before);
+  });
+
+  it("refuses arrangements that don't fit the archive: missing or extra pages, loops, odd values", async () => {
+    const z = tmp("arr4.zip", zip(files));
+    const base = layoutOf((await importArchive(z, { apply: false, conflict: "copy", userId: uid })).pages);
+    const bad: unknown[] = [
+      null,
+      "x",
+      {},
+      base.slice(1), // a page missing
+      [...base, { key: "extra", parent: null, include: true }],
+      [...base.slice(1), base[1]], // the same page twice
+      base.map((x, i) => (i === 0 ? { ...x, key: "../../etc" } : x)),
+      base.map((x, i) => (i === 0 ? { ...x, include: "yes" } : x)),
+      base.map((x, i) => (i === 0 ? { ...x, parent: "page:0" } : x)),
+      base.map((x, i) => (i === 0 ? { ...x, parent: "page:1 OR 1=1" } : x)),
+      base.map((x, i) => (i === 0 ? { ...x, parent: "page:99999999" } : x)), // doesn't exist
+      base.map((x, i) => (i === 0 ? { ...x, parent: x.key } : x)), // itself
+      base.map((x, i) => (i === 0 ? { ...x, title: 42 } : x)),
+      base.map((x) => (x.key === "handbuch" ? { ...x, parent: "handbuch/netz/vlan" } : x)), // a loop
+      base.map((x) => (x.key === "notizen" ? { ...x, parent: "handbuch/netz/vlan" } : x)), // level 4
+    ];
+    const before = (await db().prepare("SELECT COUNT(*) n FROM pages").get()) as { n: number };
+    for (const layout of bad)
+      await expect(
+        importArchive(z, { apply: true, conflict: "copy", userId: uid, layout }),
+        JSON.stringify(layout)?.slice(0, 80),
+      ).rejects.toMatchObject({ status: 400 });
+    expect(await db().prepare("SELECT COUNT(*) n FROM pages").get()).toEqual(before);
+  });
+
+  it("an existing page that is kept stays where it is; its level counts for what goes under it", async () => {
+    const ch = await createPage({ title: "Stay Kapitel", content: "", parentId: null, userId: uid });
+    const lvl2 = await createPage({ title: "Stay Mitte", content: "alt", parentId: ch.id, userId: uid });
+    await createPage({ title: "Stay Unten", content: "", parentId: lvl2.id, userId: uid }); // stay-unten, level 3
+    // the archive has "stay-unten" at the top with a child: kept in place (level 3), the child would be level 4
+    const z = tmp("arr5.zip", zip({ "stay-unten/index.md": "# neu", "stay-unten/kind.md": "# Kind" }));
+    const p = await importArchive(z, { apply: false, conflict: "skip", userId: uid });
+    expect(p.pages.find((x) => x.key === "stay-unten")).toMatchObject({
+      exists: true,
+      existingDepth: 3,
+      action: "skip",
+    });
+    await expect(
+      importArchive(z, { apply: true, conflict: "skip", userId: uid, layout: layoutOf(p.pages) }),
+    ).rejects.toMatchObject({ status: 400 });
+    // put the child at the top level instead: fine
+    const r = await importArchive(z, {
+      apply: true,
+      conflict: "skip",
+      userId: uid,
+      layout: [
+        { key: "stay-unten", parent: null, include: true },
+        { key: "stay-unten/kind", parent: null, include: true },
+      ],
+    });
+    expect(r).toMatchObject({ created: 1, skipped: 1 });
+    expect((await getPage("stay-unten"))!.parent_id).toBe(lvl2.id); // untouched
+  });
+
+  it("a staged preview belongs to the person who uploaded it and expires when replaced", async () => {
+    const a = tmp("st1.zip", zip(files));
+    const tok = stageUpload(a, 1, "st1.zip");
+    expect(existsSync(a)).toBe(false); // moved into the staging area
+    expect(stagedUpload(tok, 1).name).toBe("st1.zip");
+    expect(() => stagedUpload(tok, 2)).toThrow(/expired/); // someone else's token is just "expired"
+    for (const t of ["", "../x", tok + "x", tok.toUpperCase() === tok ? "a".repeat(32) : tok.toUpperCase(), 42, null])
+      expect(() => stagedUpload(t, 1)).toThrow(/expired/);
+    const tok2 = stageUpload(tmp("st2.zip", zip(files)), 1, "st2.zip");
+    expect(() => stagedUpload(tok, 1)).toThrow(/expired/); // one per person: the older one is gone
+    const f = stagedUpload(tok2, 1).file;
+    dropStaged(tok2);
+    expect(existsSync(f)).toBe(false);
   });
 });
 

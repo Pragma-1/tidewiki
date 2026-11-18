@@ -1,4 +1,4 @@
-import { all, one, run, sql, syncIdentity, tx, vacuum, now, type Sql } from "./db";
+import { all, one, run, sql, syncIdentity, tx, wipe, now, type Sql, type WipeTable } from "./db";
 import { HttpError } from "./validate";
 import { publish } from "./events";
 import { assertParentOk, getPage, getPageById, saveLinks, uniqueSlug, type PageRow } from "./pages";
@@ -48,6 +48,36 @@ export async function trashPage(slug: string, userId: number | null): Promise<Pa
   });
   if (page) publish({ type: "page.deleted", slug: page.slug });
   return page;
+}
+
+/**
+ * Moves several pages to the trash at once, all or nothing. Sub-pages go first (deepest first),
+ * so a page and its selected sub-pages land in the trash with their chapter links intact and a
+ * later restore puts them back together. Sub-pages that weren't selected move to the top level,
+ * as with a single delete. `allowed` decides per page (author or administrator); if any page is
+ * not allowed, nothing is deleted.
+ */
+export async function trashPages(
+  slugs: string[],
+  userId: number,
+  allowed: (p: { created_by: number | null }) => boolean,
+): Promise<{ trashed: { slug: string; title: string }[]; missing: number }> {
+  return tx(async () => {
+    const rows = await all<{ id: number; slug: string; title: string; created_by: number | null; depth: number }>(
+      sql`WITH RECURSIVE up(id, cur, d) AS (
+            SELECT id, parent_id, 1 FROM pages WHERE slug = ANY(${slugs}::text[])
+            UNION ALL SELECT up.id, p.parent_id, up.d + 1 FROM up JOIN pages p ON p.id = up.cur WHERE up.d < 50
+          )
+          SELECT p.id, p.slug, p.title, p.created_by, MAX(up.d) AS depth
+          FROM up JOIN pages p ON p.id = up.id GROUP BY p.id, p.slug, p.title, p.created_by`,
+    );
+    if (rows.some((r) => !allowed(r)))
+      throw new HttpError(403, "You can only delete pages you created. Nothing was deleted.");
+    rows.sort((a, b) => b.depth - a.depth || a.id - b.id);
+    const trashed: { slug: string; title: string }[] = [];
+    for (const r of rows) if (await trashPage(r.slug, userId)) trashed.push({ slug: r.slug, title: r.title });
+    return { trashed, missing: slugs.length - trashed.length };
+  });
 }
 
 export function listTrash(): Promise<TrashRow[]> {
@@ -196,22 +226,36 @@ export async function reinsertPage(
   return { page: (await getPageById(pageId))!, slugChanged: slug !== item.slug };
 }
 
-/** Removes for good. */
+/**
+ * Where a deleted page's text can still sit in the database files: the trash itself, and the
+ * page's old rows (page, versions, links, search index) that died when it went to the trash.
+ */
+const PAGE_TABLES: WipeTable[] = [
+  "trash",
+  "trash_revisions",
+  "pages",
+  "page_revisions",
+  "page_links",
+  "search_idx",
+  "search_dirty",
+];
+
+/** Removes for good — from the database files too, not just marked as deleted. */
 export async function purgeTrashItem(id: number): Promise<TrashItem | undefined> {
   const item = await one<TrashItem>(sql`DELETE FROM trash WHERE id = ${id} RETURNING *`);
-  if (item) await vacuum(["trash", "trash_revisions"]);
+  if (item) await wipe(PAGE_TABLES);
   return item;
 }
 
 export async function emptyTrash(): Promise<number> {
   const n = await run(sql`DELETE FROM trash`);
-  if (n) await vacuum(["trash", "trash_revisions"]);
+  if (n) await wipe(PAGE_TABLES);
   return n;
 }
 
 /** Called by the hourly retention job. */
 export async function purgeOldTrash(days = TRASH_DAYS): Promise<number> {
   const n = await run(sql`DELETE FROM trash WHERE deleted_at < ${now() - days * 86400}`);
-  if (n) await vacuum(["trash", "trash_revisions"]);
+  if (n) await wipe(PAGE_TABLES);
   return n;
 }
