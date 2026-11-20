@@ -4,6 +4,14 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [2.1.1] — 2026-11-20
+
+### Fixed
+
+- **Everything was too big on large screens.** The default size was _An den Bildschirm anpassen_, which enlarged the whole wiki by the screen width divided by 2048 px — about 1.25× on a 2560 px screen, 1.5× and more on wider ones — so 100 % looked like a zoomed-in page. The default is now _Fest_ at 100 %: the browser's own size, like every other site, with its zoom (Ctrl + / −) on top. Looks saved by 2.0 or 2.1 (when the enlarging setting was the default) are switched to _Fest_ once, keeping their size and page width; a 2.0/2.1 backup restored later gets the same treatment.
+- **The size could change on reloading a page.** The screen factor was only worked out when a page was loaded in full (which in the wiki mostly happens on _Vergleichen_ in the version history, a GET form), so a different screen width than at the first load — another monitor, a changed zoom — could make the page jump to another size there and stay that way. With _Fest_ nothing depends on the screen any more.
+- _An den Bildschirm anpassen_ is still there for wall screens and TVs, but only grows on screens larger than 2560 × 1440 px (by the smaller of the width and height ratio, so ultrawide monitors don't count) and at most 2×. The screen factor and its explanation in _Darstellung_ use the same formula as the script that sets it.
+
 ## [2.1.0] — 2026-11-20
 
 ### Added

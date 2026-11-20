@@ -294,7 +294,8 @@ export const DEFAULT_APPEARANCE: Appearance = {
   },
   band: { light: "", dark: "" },
   sheetOpacity: 100,
-  display: { scale: "auto", size: 100, width: "full" },
+  // the browser's own size, like every other site (its zoom and font settings count)
+  display: { scale: "fixed", size: 100, width: "full" },
 };
 
 const HEX = /^#[0-9a-f]{6}$/;
@@ -363,10 +364,25 @@ export function parseAppearance(raw: unknown): Appearance | null {
 }
 const lower = (v: unknown) => (typeof v === "string" ? v.toLowerCase() : v);
 
+/**
+ * Version of the stored value. 2.0 and 2.1 stored none and made "Fit the screen" the default, which
+ * enlarged everything on wide screens; their "auto" is read as "fixed" (the size slider stays).
+ */
+export const APPEARANCE_VERSION = 2;
+
+/** What gets stored: the checked look plus its version. */
+export const storedAppearance = (a: Appearance) => JSON.stringify({ v: APPEARANCE_VERSION, ...a });
+
 /** The stored value, or the default when it's missing or (from an older version) no longer valid. */
 export function appearanceFrom(stored: string): Appearance {
   try {
-    return parseAppearance(JSON.parse(stored)) ?? DEFAULT_APPEARANCE;
+    const raw: unknown = JSON.parse(stored);
+    if (raw && typeof raw === "object" && (raw as { v?: unknown }).v !== APPEARANCE_VERSION) {
+      const d = (raw as { display?: unknown }).display;
+      if (d && typeof d === "object" && (d as { scale?: unknown }).scale === "auto")
+        (d as { scale: string }).scale = "fixed";
+    }
+    return parseAppearance(raw) ?? DEFAULT_APPEARANCE;
   } catch {
     return DEFAULT_APPEARANCE;
   }
@@ -780,8 +796,15 @@ export function rootFontSize(d: Display): string {
   const f = Math.round(d.size) / 100;
   return d.scale === "auto" ? `calc(100% * var(--ui-auto, 1) * ${f})` : `calc(100% * ${f})`;
 }
-export const autoFactor = (screenWidth: number) =>
-  Math.round(Math.min(2.5, Math.max(1, (screenWidth || 0) / 2048)) * 100) / 100;
+/**
+ * "Fit the screen": grows only on screens larger than 2560 × 1440 (e.g. 4K without system scaling,
+ * a TV), by the smaller of the two ratios so ultrawide monitors don't count as large; at most 2×.
+ * AUTO_FACTOR_JS is the same formula for the script that runs before the first paint.
+ */
+export const autoFactor = (w: number, h: number) =>
+  Math.round(Math.min(2, Math.max(1, Math.min((w || 0) / 2560, (h || 0) / 1440))) * 100) / 100;
+export const AUTO_FACTOR_JS =
+  "Math.round(Math.min(2,Math.max(1,Math.min((screen.width||0)/2560,(screen.height||0)/1440)))*100)/100";
 
 /** A size kept in one browser only (e.g. a wall screen), over the shared one. */
 export const DEVICE_KEY = "tidewiki:display";
@@ -800,7 +823,7 @@ export function parseDisplay(v: unknown): Display | null {
  * size, and this browser's own size if it has one. Mirrors rootFontSize/PAGE_MAX; every value is
  * checked before use.
  */
-export const DEVICE_SCRIPT = `try{document.documentElement.style.setProperty("--ui-auto",String(Math.round(Math.min(2.5,Math.max(1,(screen.width||0)/2048))*100)/100))}catch(e){}try{var d=JSON.parse(localStorage.getItem(${JSON.stringify(DEVICE_KEY)})||"null");if(d&&(d.scale==="auto"||d.scale==="fixed")&&typeof d.size==="number"&&d.size>=${SIZE_MIN}&&d.size<=${SIZE_MAX}){var f=Math.round(d.size)/100,s=document.documentElement.style,W=${JSON.stringify(PAGE_MAX)},w=Object.prototype.hasOwnProperty.call(W,d.width)?W[d.width]:W.full;s.fontSize=d.scale==="auto"?"calc(100% * var(--ui-auto, 1) * "+f+")":"calc(100% * "+f+")";s.setProperty("--page-max",w)}}catch(e){}`;
+export const DEVICE_SCRIPT = `try{document.documentElement.style.setProperty("--ui-auto",String(${AUTO_FACTOR_JS}))}catch(e){}try{var d=JSON.parse(localStorage.getItem(${JSON.stringify(DEVICE_KEY)})||"null");if(d&&(d.scale==="auto"||d.scale==="fixed")&&typeof d.size==="number"&&d.size>=${SIZE_MIN}&&d.size<=${SIZE_MAX}){var f=Math.round(d.size)/100,s=document.documentElement.style,W=${JSON.stringify(PAGE_MAX)},w=Object.prototype.hasOwnProperty.call(W,d.width)?W[d.width]:W.full;s.fontSize=d.scale==="auto"?"calc(100% * var(--ui-auto, 1) * "+f+")":"calc(100% * "+f+")";s.setProperty("--page-max",w)}}catch(e){}`;
 
 /* -------------------------------------------------------------------- CSS */
 

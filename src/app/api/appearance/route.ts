@@ -2,7 +2,7 @@ import { api, json } from "@/lib/api";
 import { audit } from "@/lib/audit";
 import { consume } from "@/lib/rate-limit";
 import { getSettings, updateSettings } from "@/lib/settings";
-import { appearanceFrom, parseAppearance } from "@/lib/appearance";
+import { appearanceFrom, parseAppearance, storedAppearance } from "@/lib/appearance";
 import { HttpError } from "@/lib/validate";
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,7 @@ export const PUT = api("admin", async ({ body, user, ip }) => {
   const a = parseAppearance(await body(32 * 1024));
   if (!a) throw new HttpError(400, "Invalid appearance.");
   const before = (await getSettings()).appearance;
-  const value = JSON.stringify(a);
+  const value = storedAppearance(a);
   if (value === before) return json(a);
   const r = await updateSettings({ appearance: value });
   if (!r.ok) throw new HttpError(400, "Invalid appearance.");

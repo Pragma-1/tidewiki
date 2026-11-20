@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   accentPair,
   appearanceFrom,
+  AUTO_FACTOR_JS,
+  autoFactor,
   applyPreset,
   checkCustomCss,
   DEFAULT_APPEARANCE,
@@ -11,6 +13,7 @@ import {
   fontHref,
   parseAppearance,
   presetMatches,
+  storedAppearance,
   THEME_PRESETS,
   themeCss,
   type Appearance,
@@ -77,6 +80,44 @@ describe("appearance: checking what the browser sends", () => {
     expect(appearanceFrom("")).toEqual(DEFAULT_APPEARANCE);
     expect(appearanceFrom("{not json")).toEqual(DEFAULT_APPEARANCE);
     expect(appearanceFrom(JSON.stringify({ accent: "nope" }))).toEqual(DEFAULT_APPEARANCE);
+  });
+});
+
+describe("appearance: size", () => {
+  it("by default the wiki has the browser's own size, like every other site", () => {
+    expect(DEFAULT_APPEARANCE.display).toEqual({ scale: "fixed", size: 100, width: "full" });
+    expect(themeCss(DEFAULT_APPEARANCE)).toContain("font-size:calc(100% * 1)");
+    expect(themeCss(DEFAULT_APPEARANCE)).not.toContain("--ui-auto");
+  });
+
+  it("'Fit the screen' only grows on screens beyond 2560 × 1440, by the smaller ratio, at most 2×", () => {
+    const cases: [number, number, number][] = [
+      [1366, 768, 1],
+      [1920, 1080, 1],
+      [2560, 1440, 1],
+      [3440, 1440, 1], // ultrawide: not a large screen
+      [2880, 1620, 1.13],
+      [3840, 2160, 1.5],
+      [7680, 4320, 2],
+      [1440, 2560, 1], // portrait
+      [0, 0, 1],
+    ];
+    const script = new Function("screen", `return ${AUTO_FACTOR_JS}`) as (s: object) => number;
+    for (const [w, h, f] of cases) {
+      expect(autoFactor(w, h), `${w}×${h}`).toBe(f);
+      expect(script({ width: w, height: h }), `script ${w}×${h}`).toBe(f); // the pre-paint script agrees
+    }
+  });
+
+  it("looks saved by 2.0/2.1 (no version) lose the enlarging 'auto' default; newer choices are kept", () => {
+    const old = { ...clone(DEFAULT_APPEARANCE), display: { scale: "auto", size: 90, width: "wide" } };
+    expect(appearanceFrom(JSON.stringify(old)).display).toEqual({ scale: "fixed", size: 90, width: "wide" });
+    const chosen = clone(DEFAULT_APPEARANCE);
+    chosen.display.scale = "auto";
+    const stored = storedAppearance(chosen);
+    expect(JSON.parse(stored).v).toBe(2);
+    expect(appearanceFrom(stored)).toEqual(chosen);
+    expect(parseAppearance(JSON.parse(stored))).toEqual(chosen); // the version isn't part of the look
   });
 });
 

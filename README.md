@@ -59,7 +59,7 @@
 - 27 self-hosted fonts in groups (clean, friendly, serif, futuristic, condensed, retro, handwritten, monospace) or any font installed on the device. A page loads only the font in use; nothing comes from Google.
 - Accent colour (presets or your own, separately for light and dark — the light one is derived with enough contrast if you don't pick it), default theme for everyone who hasn't chosen one.
 - Background in layers: theme grey or your own page colour (the content area, lines and fields are tinted to match), an image from the wiki's uploads (blurred, darkened towards the page colour) and a gradient on top. Each layer switches on and off and keeps its settings.
-- Header band colours, content-area opacity (frosted glass over the background), size (grows with big screens, or fixed; one browser — the wall TV — can have its own) and page width.
+- Header band colours, content-area opacity (frosted glass over the background), size (the browser's own size by default, or growing on screens beyond 2560 × 1440; one browser — the wall TV — can have its own) and page width.
 - The owner's own CSS on top — it may restyle anything but not load anything from other servers.
 - Everything shows on the page as you change it and is saved a moment later.
 

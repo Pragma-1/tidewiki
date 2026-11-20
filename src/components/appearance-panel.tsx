@@ -389,7 +389,7 @@ export function AppearancePanel({
     } else edit((x) => ({ ...x, display: { ...x.display, ...patch } }));
   };
   const [screenFactor, setScreenFactor] = useState(1);
-  useEffect(() => setScreenFactor(autoFactor(screen.width)), []);
+  useEffect(() => setScreenFactor(autoFactor(screen.width, screen.height)), []);
   const screenPercent = Math.round(screenFactor * shownDisplay.size);
 
   const upload = async (file: File) => {
@@ -497,8 +497,8 @@ export function AppearancePanel({
                 label={t("Size")}
                 value={shownDisplay.scale}
                 options={[
-                  ["auto", t("Fit the screen")],
                   ["fixed", t("Fixed")],
+                  ["auto", t("Fit the screen")],
                 ]}
                 onChange={(scale) => changeDisplay({ scale })}
               />
@@ -518,10 +518,13 @@ export function AppearancePanel({
             <p className="hint">
               {shownDisplay.scale === "auto"
                 ? t(
-                    "Grows on screens wider than 2048 px; browser zoom (Ctrl + / −) works on top. On this screen: {n} %.",
+                    "Grows only on screens larger than 2560 × 1440 px (4K without system scaling, TVs); browser zoom (Ctrl + / −) works on top. On this screen: {n} %.",
                     { n: screenPercent },
                   )
-                : t("Everything is shown at {n} %, on every screen.", { n: shownDisplay.size })}
+                : t(
+                    "Everything is shown at {n} % of the browser’s own size, on every screen; browser zoom (Ctrl + / −) works on top.",
+                    { n: shownDisplay.size },
+                  )}
             </p>
             <div className="field">
               <span className="ap-label">{t("Page width")}</span>

@@ -1340,7 +1340,8 @@ export const DE: Record<string, string> = {
   "Deep sea": "Tiefsee",
   "Default theme": "Standard-Thema",
   Dusk: "Abenddämmerung",
-  "Everything is shown at {n} %, on every screen.": "Alles wird auf jedem Bildschirm mit {n} % angezeigt.",
+  "Everything is shown at {n} % of the browser’s own size, on every screen; browser zoom (Ctrl + / −) works on top.":
+    "Alles wird auf jedem Bildschirm mit {n} % der Größe des Browsers angezeigt; der Browser-Zoom (Strg + / −) wirkt zusätzlich.",
   "Everything monospaced": "Alles dicktengleich",
   "Fit the screen": "An den Bildschirm anpassen",
   Fixed: "Fest",
@@ -1357,8 +1358,8 @@ export const DE: Record<string, string> = {
   "Give this browser its own size, e.g. for a wall screen. Stored in this browser.":
     "Gibt diesem Browser eine eigene Größe, z. B. für einen Wandbildschirm. Wird in diesem Browser gespeichert.",
   Gradient: "Verlauf",
-  "Grows on screens wider than 2048 px; browser zoom (Ctrl + / −) works on top. On this screen: {n} %.":
-    "Wächst auf Bildschirmen über 2048 px Breite; der Browser-Zoom (Strg + / −) wirkt zusätzlich. Auf diesem Bildschirm: {n} %.",
+  "Grows only on screens larger than 2560 × 1440 px (4K without system scaling, TVs); browser zoom (Ctrl + / −) works on top. On this screen: {n} %.":
+    "Wächst nur auf Bildschirmen über 2560 × 1440 px (4K ohne Skalierung des Systems, Fernseher); der Browser-Zoom (Strg + / −) wirkt zusätzlich. Auf diesem Bildschirm: {n} %.",
   Handwritten: "Handschrift",
   "Handwritten notes": "Handschriftliche Notizen",
   "Harbour night": "Hafennacht",
