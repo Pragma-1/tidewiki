@@ -126,12 +126,14 @@ describe("setup + built-in pages in German", () => {
     expect(en.get("markdown-guide")?.content).toBe(SYSTEM_PAGES["markdown-guide"].versions.en.content);
     expect((await localVersions("de")).size).toBe(0); // stored in German already
     // "detached" is only in the English guide
-    expect((await search("detached")).hits).toEqual([]);
-    const hit = (await search("detached", { local: en })).hits.find((h) => h.slug === "markdown-guide");
+    expect((await search("detached", { level: 2 })).hits).toEqual([]);
+    const hit = (await search("detached", { level: 2, local: en })).hits.find((h) => h.slug === "markdown-guide");
     expect(hit?.title.map((x) => x.t).join("")).toBe("Markdown guide");
     expect(hit?.snippet.some((x) => x.hit && x.t === "detached")).toBe(true);
     // German text is not found for an English reader (they don't see it)
-    expect((await search("Anleitung", { local: en })).hits.some((h) => h.slug === "markdown-guide")).toBe(false);
+    expect((await search("Anleitung", { level: 2, local: en })).hits.some((h) => h.slug === "markdown-guide")).toBe(
+      false,
+    );
     // edited: shown as written, in every language
     await db().prepare("UPDATE pages SET content=content||'\nlokale Notiz' WHERE slug='welcome'").run();
     expect((await localVersions("en")).has("welcome")).toBe(false);
@@ -288,7 +290,7 @@ describe("GDPR", () => {
       null,
     );
     await auth.attemptLogin("gina", PW, "198.51.100.4", "probe-agent");
-    const data = await exportUserData(id);
+    const data = await exportUserData(id, 0);
     const s = JSON.stringify(data);
     expect(data.account.email).toBe("gina@example.com");
     expect(data.security_log.some((e) => e.event === "admin.user_created")).toBe(true);
@@ -303,7 +305,13 @@ describe("GDPR", () => {
     );
     const s = await auth.attemptLogin("erika", PW, "192.0.2.55", "erika-browser");
     for (let i = 0; i < 3; i++) await auth.attemptLogin("erika", "wrong-wrong-wrong-1", "192.0.2.55", null);
-    const page = await createPage({ title: "Erikas Seite", content: "shared knowledge", parentId: null, userId: id });
+    const page = await createPage({
+      level: 2,
+      title: "Erikas Seite",
+      content: "shared knowledge",
+      parentId: null,
+      userId: id,
+    });
     await audit("page.created", id, "192.0.2.55", page.slug);
     await expect(eraseOwnAccount(asUser(id), "wrong-wrong-wrong-1")).rejects.toThrow(/not correct/);
     await eraseOwnAccount(asUser(id), PW);

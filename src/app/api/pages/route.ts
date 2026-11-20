@@ -5,6 +5,7 @@ import { editComment, HttpError, int, SLUG_RE, str } from "@/lib/validate";
 import { trashPages } from "@/lib/trash";
 import { audit } from "@/lib/audit";
 import { consume } from "@/lib/rate-limit";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 
 export const POST = api("editor", async ({ body, user, ip }) => {
@@ -14,7 +15,14 @@ export const POST = api("editor", async ({ body, user, ip }) => {
   const content = str(b.content, "Content", { max: LIMITS.pageBytes, optional: true, trim: false });
   const parentId = b.parentId === null || b.parentId === undefined ? null : int(b.parentId, "Chapter");
   if (Buffer.byteLength(content) > LIMITS.pageBytes) throw new HttpError(413, "This page is too large.");
-  const p = await createPage({ title, content, parentId, userId: user!.id, comment: editComment(b.comment) });
+  const p = await createPage({
+    title,
+    content,
+    parentId,
+    userId: user!.id,
+    level: levelOf(user),
+    comment: editComment(b.comment),
+  });
   await audit("page.created", user!.id, ip, `${p.slug} (${p.title})`);
   return json({ slug: p.slug, rev: p.rev }, 201);
 });
@@ -38,7 +46,7 @@ export const DELETE = api("editor", async ({ body, user, ip }) => {
     return s;
   });
   const isAdmin = user!.role === "admin";
-  const r = await trashPages(slugs, user!.id, (p) => isAdmin || p.created_by === user!.id);
+  const r = await trashPages(slugs, user!.id, levelOf(user), (p) => isAdmin || p.created_by === user!.id);
   for (const p of r.trashed) await audit("page.trashed", user!.id, ip, `${p.slug} (${p.title})`);
   return json({ trashed: r.trashed.length, missing: r.missing });
 });

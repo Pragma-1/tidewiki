@@ -163,6 +163,7 @@ describe("creating backups", () => {
     const m1 = addMedia();
     await registerMedia(m1);
     await createPage({
+      level: 2,
       title: "Geheimrezept",
       content: `Zutaten: Kardamom ![](/media/${m1})`,
       parentId: null,
@@ -248,8 +249,15 @@ describe("restoring one page", () => {
   it("adds the backup's text as a new version, or recreates a deleted page with its history and files", async () => {
     const img = addMedia();
     await registerMedia(img);
-    const p = await createPage({ title: "Netzplan", content: `v1 ![](/media/${img})`, parentId: null, userId: editor });
+    const p = await createPage({
+      level: 2,
+      title: "Netzplan",
+      content: `v1 ![](/media/${img})`,
+      parentId: null,
+      userId: editor,
+    });
     await updatePage(p.slug, {
+      level: 2,
       title: "Netzplan",
       content: `v2 ![](/media/${img})`,
       parentId: null,
@@ -258,27 +266,34 @@ describe("restoring one page", () => {
     });
     const b = await createBackup("manual");
     // later: someone overwrites the page
-    await updatePage(p.slug, { title: "Netzplan", content: "kaputt", parentId: null, expectedRev: 2, userId: editor });
-    const r1 = await restorePage(b.id, p.id, admin);
+    await updatePage(p.slug, {
+      level: 2,
+      title: "Netzplan",
+      content: "kaputt",
+      parentId: null,
+      expectedRev: 2,
+      userId: editor,
+    });
+    const r1 = await restorePage(b.id, p.id, admin, 2);
     expect(r1.mode).toBe("version");
     const now1 = (await getPage(p.slug))!;
     expect(now1.content).toBe(`v2 ![](/media/${img})`);
     expect(now1.rev).toBe(4); // nothing overwritten: v3 "kaputt" is still in the history
     expect((await getRevision(p.id, 3))!.content).toBe("kaputt");
     expect((await getRevision(p.id, 4))!.comment).toMatch(/^Backup /);
-    await expect(restorePage(b.id, p.id, admin)).rejects.toThrow(/identical/);
+    await expect(restorePage(b.id, p.id, admin, 2)).rejects.toThrow(/identical/);
 
     // the page is deleted for good and its image too
     await trashPage(p.slug, admin);
     await db().prepare("DELETE FROM trash").run();
     await db().prepare("DELETE FROM media WHERE name=?").run(img);
     rmSync(path.join(MEDIA_DIR(), img));
-    const r2 = await restorePage(b.id, p.id, admin);
+    const r2 = await restorePage(b.id, p.id, admin, 2);
     expect(r2).toMatchObject({ mode: "recreated", slug: p.slug, files: 1 });
     expect((await listRevisions(p.id)).map((x) => x.rev)).toEqual([2, 1]); // its whole history came back
     expect(existsSync(path.join(MEDIA_DIR(), img))).toBe(true);
     expect(await db().prepare("SELECT 1 FROM media WHERE name=?").get(img)).toBeTruthy();
-    await expect(restorePage(b.id, 999_999, admin)).rejects.toThrow(/isn’t in the backup/);
+    await expect(restorePage(b.id, 999_999, admin, 2)).rejects.toThrow(/isn’t in the backup/);
     await deleteBackup(b.id);
   });
 });
@@ -290,7 +305,7 @@ describe("restoring one account", () => {
       { username: "ruth", email: "ruth@example.com", role: "editor", password: PW },
       null,
     );
-    const page = await createPage({ title: "Ruths Notizen", content: "x", parentId: null, userId: id });
+    const page = await createPage({ level: 2, title: "Ruths Notizen", content: "x", parentId: null, userId: id });
     const b = await createBackup("manual");
     await expect(restoreUser(b.id, id, adminU())).rejects.toThrow(/still exists/);
     await deleteUser(owner, id, null);
@@ -345,12 +360,12 @@ describe("restoring everything", () => {
   it("replaces the wiki, signs everyone out, keeps the storage settings, and can be undone", async () => {
     const keep = addMedia();
     await registerMedia(keep);
-    const p = await createPage({ title: "Vorher", content: "alt", parentId: null, userId: owner });
-    const goner = await createPage({ title: "Im Papierkorb", content: "x", parentId: null, userId: owner });
+    const p = await createPage({ level: 2, title: "Vorher", content: "alt", parentId: null, userId: owner });
+    const goner = await createPage({ level: 2, title: "Im Papierkorb", content: "x", parentId: null, userId: owner });
     await trashPage(goner.slug, owner);
     const b = await createBackup("manual");
 
-    const later = await createPage({ title: "Danach", content: "neu", parentId: null, userId: owner });
+    const later = await createPage({ level: 2, title: "Danach", content: "neu", parentId: null, userId: owner });
     const laterMedia = addMedia();
     await registerMedia(laterMedia);
     await db().prepare("DELETE FROM media WHERE name=?").run(keep);
@@ -362,7 +377,7 @@ describe("restoring everything", () => {
     const r = await restoreBackup(b.id);
     expect((await getPage(p.slug))?.content).toBe("alt");
     expect(await getPage(later.slug)).toBeUndefined();
-    expect((await listTrash()).map((x) => x.slug)).toContain(goner.slug);
+    expect((await listTrash(2)).map((x) => x.slug)).toContain(goner.slug);
     expect(existsSync(path.join(MEDIA_DIR(), keep))).toBe(true);
     expect(existsSync(path.join(MEDIA_DIR(), laterMedia))).toBe(false);
     expect(await db().prepare("SELECT COUNT(*) n FROM sessions").get()).toEqual({ n: 0 });
@@ -371,7 +386,7 @@ describe("restoring everything", () => {
     const safety = await getManifest(r.safety);
     expect(safety.reason).toBe("pre-restore");
     // ids continue after the restored ones
-    const fresh = await createPage({ title: "Nach Restore", content: "", parentId: null, userId: owner });
+    const fresh = await createPage({ level: 2, title: "Nach Restore", content: "", parentId: null, userId: owner });
     expect(fresh.id).toBeGreaterThan(p.id);
     // … and back
     await restoreBackup(r.safety);
@@ -526,15 +541,28 @@ describe("S3", () => {
       const store = new S3Store(cfg);
       expect((await testBackupTarget(store)).ok).toBe(true);
       setStoreForTests(store);
-      const p = await createPage({ title: "Wolkig", content: "Inhalt im Eimer", parentId: null, userId: owner });
+      const p = await createPage({
+        level: 2,
+        title: "Wolkig",
+        content: "Inhalt im Eimer",
+        parentId: null,
+        userId: owner,
+      });
       const a = await createBackup("manual");
       await createBackup("manual");
       await createBackup("manual");
       expect((await listBackups()).items.length).toBe(3); // three manifests over two listing pages
       expect(s3.requests.every((r) => r.ok)).toBe(true); // every request passed the reference signature check
       for (const v of s3.objects.values()) expect(v.includes(Buffer.from("Inhalt im Eimer"))).toBe(false);
-      await updatePage(p.slug, { title: "Wolkig", content: "geändert", parentId: null, expectedRev: 1, userId: owner });
-      await restorePage(a.id, p.id, admin);
+      await updatePage(p.slug, {
+        level: 2,
+        title: "Wolkig",
+        content: "geändert",
+        parentId: null,
+        expectedRev: 1,
+        userId: owner,
+      });
+      await restorePage(a.id, p.id, admin, 2);
       expect((await getPage(p.slug))!.content).toBe("Inhalt im Eimer");
       expect((await verifyBackup(a.id)).ok).toBe(true);
       // wrong secret → refused by the server, reported, nothing changes
@@ -647,5 +675,34 @@ describe("backup folder chosen in the settings", () => {
     } finally {
       await updateSettings({ backup_enabled: true });
     }
+  });
+});
+
+describe("backups made before private pages", () => {
+  it("their rows are read into today's columns; a page without a level is visible to all", async () => {
+    const { recordLayout, TABLES } = await import("@/lib/backup");
+    const old = {
+      ...TABLES,
+      pages: TABLES.pages.filter((c) => c !== "access"),
+      trash: TABLES.trash.filter((c) => c !== "access"),
+    };
+    const l = recordLayout(old);
+    expect(l.pages.width).toBe(TABLES.pages.length - 1);
+    const row = old.pages.map((c, i) => (c === "id" ? 7 : i));
+    const mapped = l.pages.from.map((i, k) => (i >= 0 ? row[i] : l.pages.defaults[k]));
+    expect(mapped[TABLES.pages.indexOf("access")]).toBe(0);
+    expect(mapped[TABLES.pages.indexOf("id")]).toBe(7);
+    // a backup made by this version maps one to one
+    expect(recordLayout(TABLES).pages.from).toEqual(TABLES.pages.map((_, i) => i));
+    // unknown columns, missing columns that have no default, duplicates, odd shapes: damaged
+    for (const bad of [
+      { ...TABLES, pages: [...TABLES.pages, "evil"] },
+      { ...TABLES, pages: TABLES.pages.filter((c) => c !== "content") },
+      { ...TABLES, users: [...TABLES.users, "id"] },
+      { ...TABLES, pages: "id" },
+      null,
+      "x",
+    ])
+      expect(() => recordLayout(bad)).toThrow(/damaged/);
   });
 });

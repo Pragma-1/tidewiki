@@ -1,6 +1,7 @@
 import { api, json } from "@/lib/api";
 import { LIMITS } from "@/lib/config";
-import { getPage, updatePage } from "@/lib/pages";
+import { getVisiblePage, updatePage } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { trashPage } from "@/lib/trash";
 import { editComment, HttpError, int, SLUG_RE, str } from "@/lib/validate";
 import { audit } from "@/lib/audit";
@@ -27,13 +28,14 @@ export const PUT = api<P>("editor", async ({ body, user, params }) => {
     parentId,
     expectedRev: int(b.expectedRev, "Revision"),
     userId: user!.id,
+    level: levelOf(user),
     comment: editComment(b.comment),
   });
   return json({ slug: p.slug, rev: p.rev });
 });
 
 export const DELETE = api<P>("editor", async ({ user, params, ip }) => {
-  const page = await getPage(slugOf(params.slug));
+  const page = await getVisiblePage(slugOf(params.slug), levelOf(user));
   if (!page) throw new HttpError(404, "Page not found.");
   if (user!.role !== "admin" && page.created_by !== user!.id)
     throw new HttpError(403, "Only the author or an administrator can delete this page.");

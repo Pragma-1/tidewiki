@@ -142,7 +142,7 @@ export function LogoutButton() {
   );
 }
 
-type WikiEvent = { type: "page.created" | "page.updated" | "page.deleted"; slug: string; title?: string; rev?: number };
+type WikiEvent = { type: "page.created" | "page.updated" | "page.deleted" | "page.access"; slug: string; rev?: number };
 
 /** Subscribes to server-sent events so every open page reflects edits as they happen. */
 export function LiveUpdates({ slug, rev, editing = false }: { slug?: string; rev?: number; editing?: boolean }) {
@@ -166,6 +166,12 @@ export function LiveUpdates({ slug, rev, editing = false }: { slug?: string; rev
         return;
       }
       if (mine && e.type === "page.updated" && e.rev !== undefined && rev !== undefined && e.rev <= rev) return;
+      if (e.type === "page.access") {
+        // who may see it changed: reload (a page that's private for this reader now is gone for them)
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => router.refresh(), 150);
+        return;
+      }
       if (editing && mine) {
         setNote(msg("Someone else just saved this page. Your changes are kept here — saving will ask you to merge."));
         return;

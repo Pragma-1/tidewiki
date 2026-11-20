@@ -398,6 +398,13 @@ mark ::selection {
   flex: 1;
   padding: 0.32rem 0.3rem;
 }
+/* private page or section */
+.tree-lock {
+  display: inline-flex;
+  vertical-align: -0.05em;
+  margin-left: 0.35rem;
+  opacity: 0.7;
+}
 .rail-actions {
   display: grid;
   gap: 0.4rem;
@@ -3258,4 +3265,118 @@ dialog.confirm-dlg.wide-dlg {
   width: 100%;
   font-size: 0.85rem;
   resize: vertical;
+}
+
+/* ---------- shared links: read-only view for visitors without an account ---------- */
+.frame.share-single {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: min(100%, 64rem);
+}
+.share-top .top-actions {
+  margin-left: auto;
+}
+.share-banner {
+  align-items: center;
+  font-size: 0.92rem;
+  color: var(--ink-2);
+}
+.share-tree li {
+  list-style: none;
+}
+.share-tree {
+  margin: 0;
+  padding: 0;
+}
+
+/* visibility and sharing dialogs */
+dialog.confirm-dlg.wide-share {
+  width: min(40rem, calc(100vw - 2rem));
+}
+.vis-opts {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.9rem;
+}
+.vis-opt {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  cursor: pointer;
+}
+.vis-opt.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.vis-opt.off {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.vis-opt input {
+  accent-color: var(--accent);
+  margin: 0.2rem 0 0;
+}
+.vis-opt small {
+  display: block;
+  color: var(--ink-2);
+}
+.private-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  margin-top: 0.35rem;
+}
+.share-new {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  margin-bottom: 1rem;
+}
+.share-made {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.share-made input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.85rem;
+}
+.share-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  max-height: min(40vh, 22rem);
+  overflow-y: auto;
+}
+.share-list li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  font-size: 0.9rem;
+}
+.share-list .hint {
+  margin: 0;
+}
+@media print {
+  .share-banner {
+    display: none !important;
+  }
 }

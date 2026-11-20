@@ -1,12 +1,23 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { ArrowLeft, ArrowRight, Download, History, Link2, Pencil } from "lucide-react";
+import { ArrowLeft, ArrowRight, Download, FileDown, History, Link2, Lock, Pencil } from "lucide-react";
 import { Shell } from "@/components/shell";
 import { DeleteButton } from "@/components/page-actions";
+import { AccessButton, ShareButton } from "@/components/access-share";
 import { Notice } from "@/components/ui";
 import { gate, mayRead } from "@/lib/guard";
-import { backlinks, breadcrumbs, getPage, getTree, readingOrder, type TreeNode } from "@/lib/pages";
+import {
+  backlinks,
+  breadcrumbs,
+  descendantCount,
+  getTree,
+  getVisiblePage,
+  readingOrder,
+  type TreeNode,
+} from "@/lib/pages";
+import { accessInfo, accessName, levelOf } from "@/lib/access";
+import { getCurrentUser } from "@/lib/session-cookie";
 import { renderMarkdown } from "@/lib/markdown";
 import { getLang } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
@@ -28,7 +39,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
   if (!(await mayRead())) return {}; // the page redirects to the sign-in; its title stays private
   const lang = await getLang();
-  const page = SLUG_RE.test(slug) && slug.length <= 80 ? await getPage(slug) : undefined;
+  const page =
+    SLUG_RE.test(slug) && slug.length <= 80 ? await getVisiblePage(slug, levelOf(await getCurrentUser())) : undefined;
   return { title: page ? localPage(page, await localVersions(lang)).title : makeT(lang)("Page not found") };
 }
 
@@ -37,18 +49,22 @@ export default async function WikiPage({ params, searchParams }: Props) {
   const moved = (await searchParams)?.moved === "1";
   const user = await gate("read");
   if (!SLUG_RE.test(slug) || slug.length > 80) notFound();
-  const stored = await getPage(slug);
+  const level = levelOf(user);
+  const stored = await getVisiblePage(slug, level);
   if (!stored) notFound();
   const lang = await getLang();
   const t = makeT(lang);
   const local = await localVersions(lang);
   const page = localPage(stored, local);
-  const children = find(localTree(await getTree(), local), page.id)?.children ?? [];
+  const children = find(localTree(await getTree(level), local), page.id)?.children ?? [];
   const canEdit = !!user && user.role !== "viewer";
   const canDelete = !!user && (user.role === "admin" || (user.role !== "viewer" && page.created_by === user.id));
   const crumbs = (await breadcrumbs(page)).map((c) => localTitle(c, local));
-  const linkedFrom = (await backlinks(page.slug)).map((b) => localTitle(b, local));
-  const order = (await readingOrder()).map((o) => localTitle(o, local));
+  const linkedFrom = (await backlinks(page.slug, level)).map((b) => localTitle(b, local));
+  const order = (await readingOrder(level)).map((o) => localTitle(o, local));
+  const access = await accessInfo(page.id);
+  const isAdmin = !!user && user.role === "admin";
+  const subpages = isAdmin ? await descendantCount(page.id) : 0;
   const at = order.findIndex((o) => o.slug === page.slug);
   const prev = at > 0 ? order[at - 1] : null,
     next = at >= 0 && at < order.length - 1 ? order[at + 1] : null;
@@ -91,6 +107,15 @@ export default async function WikiPage({ params, searchParams }: Props) {
                     : ""}{" "}
                 · {t("version {n}", { n: page.rev })}
               </p>
+              {access.effective > 0 && (
+                <p className="private-badge">
+                  <Lock size={13} aria-hidden />
+                  {access.effective === 2 ? t("Private: only the owner") : t("Private: administrators and the owner")}
+                  {access.own < access.effective && access.from
+                    ? ` · ${t("set on “{title}”", { title: localTitle(access.from, local).title })}`
+                    : ""}
+                </p>
+              )}
             </div>
             <div className="row">
               {canEdit && (
@@ -116,6 +141,21 @@ export default async function WikiPage({ params, searchParams }: Props) {
                   <span className="sr-only">{t("Download as Markdown")}</span>.md
                 </a>
               )}
+              <a className="btn ghost sm" href={`/api/pages/${page.slug}/pdf`} download title={t("Save as PDF")}>
+                <FileDown size={15} aria-hidden />
+                PDF
+              </a>
+              {isAdmin && (
+                <AccessButton
+                  slug={page.slug}
+                  own={accessName(access.own)}
+                  inherited={accessName(access.inherited)}
+                  inheritedFrom={access.from ? localTitle(access.from, local).title : null}
+                  isOwner={!!user?.isOwner}
+                  subpages={subpages}
+                />
+              )}
+              {isAdmin && <ShareButton slug={page.slug} hasChildren={subpages > 0} isPrivate={access.effective > 0} />}
               {canDelete && <DeleteButton slug={page.slug} title={page.title} />}
             </div>
           </div>

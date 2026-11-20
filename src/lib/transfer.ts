@@ -19,7 +19,8 @@ import path from "node:path";
 import { Unzip, UnzipInflate, UnzipPassThrough, Zip, ZipDeflate, ZipPassThrough } from "fflate";
 import { all, one, run, sql, tx, now } from "./db";
 import { LIMITS as APP } from "./config";
-import { getPage, getTree, createPage, updatePage, type TreeNode } from "./pages";
+import { getTree, getVisiblePage, createPage, updatePage, type TreeNode } from "./pages";
+import { hiddenPages, type Level } from "./access";
 import { LIMITS as MEDIA, MEDIA_DIR, sniff, stripImage, type MediaRow } from "./media";
 import { HttpError, slugify } from "./validate";
 
@@ -54,8 +55,12 @@ function exportPaths(nodes: TreeNode[], prefix = ""): { id: number; path: string
   );
 }
 
-/** Streams the whole wiki as a ZIP. Pull-based, so memory stays flat no matter how big the media folder is. */
-export function exportWikiZip(): ReadableStream<Uint8Array> {
+/**
+ * Streams the whole wiki as a ZIP — every page someone at `level` may see. Pull-based, so memory
+ * stays flat no matter how big the media folder is. Private pages carry their level in the front
+ * matter; files that only pages beyond the level show are left out.
+ */
+export function exportWikiZip(level: Level): ReadableStream<Uint8Array> {
   let pullWaiter: (() => void) | null = null;
   let cancelled = false;
   let ctrl!: ReadableStreamDefaultController<Uint8Array>;
@@ -99,14 +104,23 @@ export function exportWikiZip(): ReadableStream<Uint8Array> {
 
   void (async () => {
     try {
-      const paths = exportPaths(await getTree());
-      const pages = await all<{ id: number; slug: string; title: string; content: string; updated_at: number }>(
-        sql`SELECT id, slug, title, content, updated_at FROM pages`,
+      const paths = exportPaths(await getTree(level));
+      const pages = await all<{ id: number; slug: string; title: string; content: string; access: number }>(
+        sql`SELECT id, slug, title, content, access FROM pages`,
       );
+      const hidden = await hiddenPages(level);
       const byId = new Map(pages.map((p) => [p.id, p]));
-      const media = await all<Pick<MediaRow, "name" | "original_name" | "mime">>(
-        sql`SELECT name, original_name, mime FROM media ORDER BY id`,
-      );
+      const refs = (ps: typeof pages) =>
+        new Set(
+          ps.flatMap((p) => [...p.content.matchAll(/\/media\/([A-Za-z0-9_-]{8,60}\.[a-z0-9]{2,5})/g)].map((m) => m[1])),
+        );
+      const shown = refs(pages.filter((p) => !hidden.has(p.id)));
+      const onlyHidden = refs(pages.filter((p) => hidden.has(p.id)));
+      const media = (
+        await all<Pick<MediaRow, "name" | "original_name" | "mime">>(
+          sql`SELECT name, original_name, mime FROM media ORDER BY id`,
+        )
+      ).filter((m) => shown.has(m.name) || !onlyHidden.has(m.name));
       addText(
         "tidewiki.json",
         JSON.stringify(
@@ -124,7 +138,7 @@ export function exportWikiZip(): ReadableStream<Uint8Array> {
       for (const p of paths) {
         if (cancelled) return;
         const page = byId.get(p.id)!;
-        addText(p.path, toMarkdownFile(page.title, page.content));
+        addText(p.path, toMarkdownFile(page.title, page.content, page.access));
         await drained();
       }
       for (const m of media) {
@@ -459,6 +473,8 @@ type Node = {
   parentPage: number | null;
   depth: number;
   path: string;
+  /** private page (from the front matter "access:"), capped at the importer's level when applied */
+  access: Level;
 };
 
 const LAYOUT_BAD = "The arrangement doesn’t match the file. Check the file again.";
@@ -477,6 +493,7 @@ async function arrange(
   actionOf: Map<string, PlanItem["action"]>,
   existsFor: Map<string, boolean>,
   existing: Map<string, { id: number; depth: number }>,
+  hidden: Set<number>,
 ): Promise<{ ordered: Node[]; pageTitles: Map<number, string> }> {
   if (!Array.isArray(layout) || layout.length !== nodes.size) throw new HttpError(400, LAYOUT_BAD);
   type It = { node: Node; parentKey: string | null; parentPage: number | null; include: boolean; index: number };
@@ -535,7 +552,7 @@ async function arrange(
           SELECT p.id, p.title, MAX(up.d) AS depth FROM up JOIN pages p ON p.id = up.id GROUP BY p.id, p.title`,
     ))
       pages.set(r.id, { title: r.title, depth: r.depth });
-    if (pageIds.some((id) => !pages.has(id)))
+    if (pageIds.some((id) => !pages.has(id) || hidden.has(id)))
       throw new HttpError(400, "The selected chapter does not exist.", "parentId");
   }
   const depth = new Map<string, number>();
@@ -581,7 +598,7 @@ async function arrange(
  */
 export async function importArchive(
   file: string,
-  opts: { apply: boolean; conflict: Conflict; userId: number; singleName?: string; layout?: unknown },
+  opts: { apply: boolean; conflict: Conflict; userId: number; level: Level; singleName?: string; layout?: unknown },
 ): Promise<ImportResult> {
   const warnings: string[] = [];
   const head = Buffer.alloc(4);
@@ -608,7 +625,7 @@ export async function importArchive(
 
 async function plan(
   entries: Entry[],
-  opts: { apply: boolean; conflict: Conflict; userId: number; layout?: unknown },
+  opts: { apply: boolean; conflict: Conflict; userId: number; level: Level; layout?: unknown },
   warnings: string[],
 ): Promise<ImportResult> {
   // ---- pages: folder structure -> hierarchy
@@ -636,6 +653,7 @@ async function plan(
       parentPage: null,
       depth: 0,
       path: e.path,
+      access: fm.access === "owner" ? 2 : fm.access === "admins" ? 1 : 0,
     });
   }
   // folders without an index page become empty chapter pages
@@ -653,6 +671,7 @@ async function plan(
           parentPage: null,
           depth: 0,
           path: `${k}/`,
+          access: 0,
         });
     }
   }
@@ -672,6 +691,7 @@ async function plan(
   if (defaultOrder.length > 2000) throw new HttpError(413, "The archive has too many files.");
 
   // ---- existing pages with the same address, and what happens to them
+  const hiddenForImport = await hiddenPages(opts.level);
   const existing = new Map(
     (
       await all<{ slug: string; id: number; title: string; depth: number }>(
@@ -682,7 +702,10 @@ async function plan(
             SELECT p.slug, p.id, p.title, MAX(up.d) AS depth FROM up JOIN pages p ON p.id = up.id
             GROUP BY p.slug, p.id, p.title`,
       )
-    ).map((r) => [r.slug, r]),
+    )
+      // pages the importer may not see don't exist for them: such a file becomes a new page
+      .filter((r) => !hiddenForImport.has(r.id))
+      .map((r) => [r.slug, r]),
   );
   const claimed = new Set<string>(); // a slug used twice inside the archive must not "conflict" with itself
   const actionOf = new Map<string, PlanItem["action"]>();
@@ -698,7 +721,10 @@ async function plan(
   }
 
   // ---- the order and chapters: the archive's folders, or how the person arranged them
-  const arranged = opts.layout === undefined ? null : await arrange(nodes, opts.layout, actionOf, existsFor, existing);
+  const arranged =
+    opts.layout === undefined
+      ? null
+      : await arrange(nodes, opts.layout, actionOf, existsFor, existing, hiddenForImport);
   const ordered = arranged ? arranged.ordered : defaultOrder;
   const parentPageTitle = arranged?.pageTitles ?? new Map<number, string>();
 
@@ -781,7 +807,8 @@ async function plan(
         const n = ordered[i];
         const item = planItems[i];
         const parentId = n.parentPage ?? (n.parentKey ? (idByKey.get(n.parentKey) ?? null) : null);
-        const existing = item.action === "create" || item.action === "copy" ? undefined : await getPage(n.slug);
+        const existing =
+          item.action === "create" || item.action === "copy" ? undefined : await getVisiblePage(n.slug, opts.level);
         if (item.action === "skip" && existing) {
           idByKey.set(n.key, existing.id);
           continue;
@@ -793,6 +820,7 @@ async function plan(
             parentId: parentId === existing.id ? existing.parent_id : parentId,
             expectedRev: existing.rev,
             userId: opts.userId,
+            level: opts.level,
           });
           idByKey.set(n.key, p.id);
           result.updated++;
@@ -803,6 +831,8 @@ async function plan(
           content: fix(n.content),
           parentId,
           userId: opts.userId,
+          level: opts.level,
+          access: n.access,
           slug: n.slug,
         });
         item.slug = p.slug;

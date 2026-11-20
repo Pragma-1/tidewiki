@@ -5,6 +5,7 @@ import { consume } from "@/lib/rate-limit";
 import { importArchive, receiveUpload, stageUpload, type Conflict } from "@/lib/transfer";
 import { HttpError } from "@/lib/validate";
 import { backupBusy, createBackupInLock, exclusive } from "@/lib/backup";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 
 // Body = a .zip (wiki export or any folder of .md files) or a single .md file.
@@ -27,7 +28,13 @@ export const POST = api("admin", async ({ req, user, ip, t }) => {
     // one import at a time, never during a backup or restore; applying first saves a safety backup
     const r = await exclusive("import", async () => {
       if (apply) await createBackupInLock("pre-import");
-      return importArchive(f, { apply, conflict, userId: user!.id, singleName: name || undefined });
+      return importArchive(f, {
+        apply,
+        conflict,
+        userId: user!.id,
+        level: levelOf(user),
+        singleName: name || undefined,
+      });
     });
     if (apply)
       await audit(

@@ -2,6 +2,7 @@ import { all, one, run, sql, syncIdentity, tx, wipe, now, type Sql, type WipeTab
 import { HttpError } from "./validate";
 import { publish } from "./events";
 import { assertParentOk, getPage, getPageById, saveLinks, uniqueSlug, type PageRow } from "./pages";
+import { effectiveAccess, hiddenPages, type Level } from "./access";
 
 /** Deleted pages stay in the trash this long, then they are removed for good by the hourly job. */
 export const TRASH_DAYS = 30;
@@ -17,25 +18,30 @@ export type TrashRow = {
   author: string | null;
   parent_title: string | null;
   size: number;
+  access: number;
 };
 
 /**
  * Moves a page and its whole history into the trash, in one transaction. Revisions are copied
  * with INSERT … SELECT, so even a page with hundreds of large versions never passes through JS.
  * Sub-pages are not deleted: they move to the top level (as before), and the trash remembers
- * them so a restore can put them back under the page.
+ * them so a restore can put them back under the page. A private page's sub-pages keep its level
+ * (they'd otherwise become public at the top level); the trash keeps the level the page had.
  */
 export async function trashPage(slug: string, userId: number | null): Promise<PageRow | null> {
   const t = now();
+  let eff: Level = 0;
   const page = await tx(async () => {
     const p = await getPage(slug);
     if (!p) return null;
+    eff = await effectiveAccess(p.id);
     const children = (await all<{ id: number }>(sql`SELECT id FROM pages WHERE parent_id = ${p.id}`)).map((c) => c.id);
+    if (eff > 0) await run(sql`UPDATE pages SET access = GREATEST(access, ${eff}) WHERE parent_id = ${p.id}`);
     const r = await one<{ id: number }>(
       sql`INSERT INTO trash(page_id, slug, title, parent_id, position, content, rev, created_by, updated_by,
-            created_at, updated_at, system_key, children, deleted_by, deleted_at)
+            created_at, updated_at, system_key, children, deleted_by, deleted_at, access)
           SELECT id, slug, title, parent_id, position, content, rev, created_by, updated_by, created_at, updated_at,
-            system_key, ${JSON.stringify(children)}, ${userId}, ${t}
+            system_key, ${JSON.stringify(children)}, ${userId}, ${t}, ${eff}
           FROM pages WHERE id = ${p.id} RETURNING id`,
     );
     await run(
@@ -46,7 +52,7 @@ export async function trashPage(slug: string, userId: number | null): Promise<Pa
     await run(sql`DELETE FROM pages WHERE id = ${p.id}`); // revisions, links and search entries cascade
     return p;
   });
-  if (page) publish({ type: "page.deleted", slug: page.slug });
+  if (page) publish({ type: "page.deleted", slug: page.slug, access: eff });
   return page;
 }
 
@@ -60,9 +66,23 @@ export async function trashPage(slug: string, userId: number | null): Promise<Pa
 export async function trashPages(
   slugs: string[],
   userId: number,
+  level: Level,
   allowed: (p: { created_by: number | null }) => boolean,
 ): Promise<{ trashed: { slug: string; title: string }[]; missing: number }> {
+  const asked = slugs.length;
   return tx(async () => {
+    // pages this person may not see don't exist for them: counted as missing, never deleted
+    const hidden = await hiddenPages(level);
+    if (hidden.size) {
+      const gone = new Set(
+        (
+          await all<{ slug: string }>(
+            sql`SELECT slug FROM pages WHERE slug = ANY(${slugs}::text[]) AND id = ANY(${[...hidden]}::bigint[])`,
+          )
+        ).map((r) => r.slug),
+      );
+      slugs = slugs.filter((x) => !gone.has(x));
+    }
     const rows = await all<{ id: number; slug: string; title: string; created_by: number | null; depth: number }>(
       sql`WITH RECURSIVE up(id, cur, d) AS (
             SELECT id, parent_id, 1 FROM pages WHERE slug = ANY(${slugs}::text[])
@@ -76,21 +96,27 @@ export async function trashPages(
     rows.sort((a, b) => b.depth - a.depth || a.id - b.id);
     const trashed: { slug: string; title: string }[] = [];
     for (const r of rows) if (await trashPage(r.slug, userId)) trashed.push({ slug: r.slug, title: r.title });
-    return { trashed, missing: slugs.length - trashed.length };
+    return { trashed, missing: asked - trashed.length };
   });
 }
 
-export function listTrash(): Promise<TrashRow[]> {
+/** What's in the trash, for someone at `level` (deleted private pages only for those who saw them). */
+export async function listTrash(level: Level): Promise<TrashRow[]> {
+  const hidden = await hiddenPages(level);
   return all<TrashRow>(
-    sql`SELECT t.id, t.page_id, t.slug, t.title, t.rev, t.deleted_at, length(t.content) AS size,
-          du.username AS deleted_by_name, cu.username AS author, pp.title AS parent_title
+    sql`SELECT t.id, t.page_id, t.slug, t.title, t.rev, t.deleted_at, length(t.content) AS size, t.access,
+          du.username AS deleted_by_name, cu.username AS author,
+          CASE WHEN ${hidden.size ? sql`pp.id = ANY(${[...hidden]}::bigint[])` : sql`FALSE`} THEN NULL ELSE pp.title END
+            AS parent_title
         FROM trash t LEFT JOIN users du ON du.id = t.deleted_by LEFT JOIN users cu ON cu.id = t.created_by
         LEFT JOIN pages pp ON pp.id = t.parent_id
+        WHERE t.access <= ${level}
         ORDER BY t.deleted_at DESC, t.id DESC LIMIT 500`,
   );
 }
 
-export const trashCount = async () => (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM trash`))?.n ?? 0;
+export const trashCount = async (level: Level) =>
+  (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM trash WHERE access <= ${level}`))?.n ?? 0;
 
 /** Route parameter → trash id; anything odd is simply "not in the trash". */
 export function trashId(s: string): number {
@@ -116,9 +142,13 @@ export type TrashItem = {
   children: string;
   deleted_by: number | null;
   deleted_at: number;
+  /** the level the page had when it was deleted */
+  access: number;
 };
 
-export const getTrashItem = (id: number) => one<TrashItem>(sql`SELECT * FROM trash WHERE id = ${id}`);
+/** One item of the trash, if someone at `level` may see it (null = internal, no check). */
+export const getTrashItem = (id: number, level: Level | null) =>
+  one<TrashItem>(sql`SELECT * FROM trash WHERE id = ${id} ${level === null ? sql`` : sql`AND access <= ${level}`}`);
 
 export const trashRevisionCount = async (id: number) =>
   (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM trash_revisions WHERE trash_id = ${id}`))?.n ?? 0;
@@ -139,9 +169,10 @@ export function childIds(raw: string): number[] {
  * former sub-pages back under it — but only those still at the top level, so nothing that was
  * filed elsewhere in the meantime is moved.
  */
-export async function restoreFromTrash(id: number): Promise<{ page: PageRow; slugChanged: boolean }> {
+export async function restoreFromTrash(id: number, level: Level): Promise<{ page: PageRow; slugChanged: boolean }> {
+  let eff: Level = 0;
   const res = await tx(async () => {
-    const item = await getTrashItem(id);
+    const item = await getTrashItem(id, level);
     if (!item) throw new HttpError(404, "This page is no longer in the trash.");
     const page = await reinsertPage(
       {
@@ -152,9 +183,10 @@ export async function restoreFromTrash(id: number): Promise<{ page: PageRow; slu
       childIds(item.children),
     );
     await run(sql`DELETE FROM trash WHERE id = ${id}`);
+    eff = await effectiveAccess(page.page.id);
     return page;
   });
-  publish({ type: "page.created", slug: res.page.slug, title: res.page.title, rev: res.page.rev });
+  publish({ type: "page.created", slug: res.page.slug, rev: res.page.rev, access: eff });
   return res;
 }
 
@@ -173,7 +205,7 @@ export async function reinsertPage(
   let parentId: number | null = item.parent_id;
   if (parentId !== null) {
     try {
-      await assertParentOk(null, parentId);
+      await assertParentOk(null, parentId, null);
     } catch {
       parentId = null;
     }
@@ -187,11 +219,11 @@ export async function reinsertPage(
       : null;
   const r = await one<{ id: number }>(
     sql`INSERT INTO pages(id, slug, title, parent_id, position, content, rev, created_by, updated_by, created_at,
-          updated_at, system_key)
+          updated_at, system_key, access)
         VALUES (COALESCE(${idFree ? item.page_id : null}::bigint, nextval(pg_get_serial_sequence('pages', 'id'))),
           ${slug}, ${item.title}, ${parentId}, ${item.position}, ${item.content}, ${item.rev},
           (SELECT id FROM users WHERE id = ${item.created_by}), (SELECT id FROM users WHERE id = ${item.updated_by}),
-          ${item.created_at}, ${item.updated_at}, ${sysKey})
+          ${item.created_at}, ${item.updated_at}, ${sysKey}, ${Math.min(2, Math.max(0, item.access))})
         RETURNING id`,
   );
   const pageId = r!.id;
@@ -217,7 +249,7 @@ export async function reinsertPage(
   for (const c of children) {
     if (!(await one(sql`SELECT 1 FROM pages WHERE id = ${c} AND parent_id IS NULL`))) continue;
     try {
-      await assertParentOk(c, pageId);
+      await assertParentOk(c, pageId, null);
       await run(sql`UPDATE pages SET parent_id = ${pageId} WHERE id = ${c} AND parent_id IS NULL`);
     } catch {
       /* too deep now, or would form a cycle: leave it where it is */
@@ -241,14 +273,15 @@ const PAGE_TABLES: WipeTable[] = [
 ];
 
 /** Removes for good — from the database files too, not just marked as deleted. */
-export async function purgeTrashItem(id: number): Promise<TrashItem | undefined> {
-  const item = await one<TrashItem>(sql`DELETE FROM trash WHERE id = ${id} RETURNING *`);
+export async function purgeTrashItem(id: number, level: Level): Promise<TrashItem | undefined> {
+  const item = await one<TrashItem>(sql`DELETE FROM trash WHERE id = ${id} AND access <= ${level} RETURNING *`);
   if (item) await wipe(PAGE_TABLES);
   return item;
 }
 
-export async function emptyTrash(): Promise<number> {
-  const n = await run(sql`DELETE FROM trash`);
+/** Empties the trash of everything someone at `level` can see in it. */
+export async function emptyTrash(level: Level): Promise<number> {
+  const n = await run(sql`DELETE FROM trash WHERE access <= ${level}`);
   if (n) await wipe(PAGE_TABLES);
   return n;
 }

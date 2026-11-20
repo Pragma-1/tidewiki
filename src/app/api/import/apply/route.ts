@@ -3,6 +3,7 @@ import { audit } from "@/lib/audit";
 import { consume } from "@/lib/rate-limit";
 import { dropStaged, importArchive, stagedUpload, type Conflict } from "@/lib/transfer";
 import { HttpError } from "@/lib/validate";
+import { levelOf } from "@/lib/access";
 import { backupBusy, createBackupInLock, exclusive } from "@/lib/backup";
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ export const POST = api("admin", async ({ body, user, ip, t }) => {
       apply: true,
       conflict,
       userId: user!.id,
+      level: levelOf(user),
       singleName: staged.name || undefined,
       layout: b.layout,
     });

@@ -3,6 +3,7 @@ import { Shell } from "@/components/shell";
 import { PageManager } from "@/components/page-manager";
 import { gate } from "@/lib/guard";
 import { listPages } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { getT } from "@/lib/i18n-server";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
@@ -14,7 +15,7 @@ export default async function ManagePages() {
   const user = (await gate("edit"))!;
   const t = await getT();
   const isAdmin = user.role === "admin";
-  const pages = (await listPages()).map((p) => ({
+  const pages = (await listPages(levelOf(user))).map((p) => ({
     id: p.id,
     slug: p.slug,
     title: p.title,

@@ -8,6 +8,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
 import { getSettings, renderSettings } from "@/lib/settings";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
   return { title: (await getT())("Trash") };
@@ -18,7 +19,7 @@ export default async function TrashItem({ params }: { params: Promise<{ id: stri
   const user = (await gate("edit"))!;
   const { id } = await params;
   if (!/^[1-9]\d{0,15}$/.test(id)) notFound();
-  const item = await getTrashItem(Number(id));
+  const item = await getTrashItem(Number(id), levelOf(user));
   if (!item) notFound();
   const lang = await getLang();
   const t = makeT(lang);

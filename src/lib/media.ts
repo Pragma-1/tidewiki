@@ -15,6 +15,7 @@ import path from "node:path";
 import { DATA_DIR } from "./config";
 import { all, one, run, sql, now, tx, wipe } from "./db";
 import { HttpError } from "./validate";
+import { hiddenPages, levelOf, type Level } from "./access";
 
 export const MEDIA_DIR = () => path.join(/* turbopackIgnore: true */ DATA_DIR, "media");
 const MB = 1024 * 1024;
@@ -442,6 +443,48 @@ export async function listMedia(): Promise<ListedMedia[]> {
   );
 }
 
+/**
+ * Files that only pages beyond `level` show (private pages, also deleted ones in the trash), and
+ * no page the person may see nor the look of the wiki (background, custom CSS): those files are
+ * kept from them like the pages themselves.
+ */
+export async function privateMedia(level: Level): Promise<Set<string>> {
+  const hidden = await hiddenPages(level);
+  const ids = [...hidden];
+  const rows = await all<{ name: string }>(
+    sql`SELECT name FROM (
+          SELECT m[1] AS name FROM pages p, regexp_matches(p.content, ${NAME_IN_TEXT}, 'g') m WHERE p.id = ANY(${ids}::bigint[])
+          UNION
+          SELECT m[1] FROM trash t, regexp_matches(t.content, ${NAME_IN_TEXT}, 'g') m WHERE t.access > ${level}
+        ) priv
+        WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE NOT (p.id = ANY(${ids}::bigint[]))
+                            AND strpos(p.content, '/media/' || priv.name) > 0)
+          AND NOT EXISTS (SELECT 1 FROM settings s WHERE s.key IN ('appearance', 'custom_css')
+                            AND strpos(s.value, '/media/' || priv.name) > 0)`,
+  );
+  return new Set(rows.map((r) => r.name));
+}
+
+/** One file: is it shown only by pages beyond `level`? (Checked on every download of a file.) */
+export async function isPrivateMedia(name: string, level: Level): Promise<boolean> {
+  if (level >= 2) return false;
+  const hidden = await hiddenPages(level);
+  const anyPrivateTrash = await one(sql`SELECT 1 FROM trash WHERE access > ${level} LIMIT 1`);
+  if (!hidden.size && !anyPrivateTrash) return false;
+  const ids = [...hidden];
+  const r = await one<{ private: boolean }>(
+    sql`SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM pages WHERE id = ANY(${ids}::bigint[]) AND strpos(content, ${`/media/${name}`}) > 0)
+            OR EXISTS (SELECT 1 FROM trash WHERE access > ${level} AND strpos(content, ${`/media/${name}`}) > 0)
+          THEN NOT EXISTS (SELECT 1 FROM pages WHERE NOT (id = ANY(${ids}::bigint[]))
+                             AND strpos(content, ${`/media/${name}`}) > 0)
+           AND NOT EXISTS (SELECT 1 FROM settings WHERE key IN ('appearance', 'custom_css')
+                             AND strpos(value, ${`/media/${name}`}) > 0)
+          ELSE FALSE END AS private`,
+  );
+  return !!r?.private;
+}
+
 /** Removes the files of deleted rows from disk, then the rows from the database files (see wipe). */
 async function removeFiles(rows: MediaRow[]) {
   for (const m of rows)
@@ -453,9 +496,16 @@ async function removeFiles(rows: MediaRow[]) {
  * Deletes files for good: the database row, the file on disk, and the row's traces in the
  * database files. Uploaders may delete their own files, administrators any. All or nothing.
  */
-export async function deleteMediaMany(ids: number[], actor: { id: number; role: string }): Promise<MediaRow[]> {
+export async function deleteMediaMany(
+  ids: number[],
+  actor: { id: number; role: string; isOwner: boolean },
+): Promise<MediaRow[]> {
+  const priv = await privateMedia(levelOf(actor));
   const rows = await tx(async () => {
-    const found = await all<MediaRow>(sql`SELECT * FROM media WHERE id = ANY(${ids}::bigint[]) FOR UPDATE`);
+    // files of private pages beyond the person's level don't exist for them
+    const found = (await all<MediaRow>(sql`SELECT * FROM media WHERE id = ANY(${ids}::bigint[]) FOR UPDATE`)).filter(
+      (m) => !priv.has(m.name),
+    );
     if (actor.role !== "admin" && found.some((m) => m.created_by !== actor.id))
       throw new HttpError(403, "Only the uploader or an administrator can delete this file.");
     await deleteRows(found.map((m) => m.id));
@@ -466,7 +516,7 @@ export async function deleteMediaMany(ids: number[], actor: { id: number; role: 
 }
 const deleteRows = (ids: number[]) => run(sql`DELETE FROM media WHERE id = ANY(${ids}::bigint[])`);
 
-export async function deleteMedia(id: number, actor: { id: number; role: string }) {
+export async function deleteMedia(id: number, actor: { id: number; role: string; isOwner: boolean }) {
   const [m] = await deleteMediaMany([id], actor);
   if (!m) throw new HttpError(404, "File not found.");
   return m;

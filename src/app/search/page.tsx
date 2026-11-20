@@ -8,6 +8,7 @@ import { Notice } from "@/components/ui";
 import { consume } from "@/lib/rate-limit";
 import { getLang, getT } from "@/lib/i18n-server";
 import { localVersions } from "@/lib/system-pages";
+import { levelOf } from "@/lib/access";
 import { getCurrentUser } from "@/lib/session-cookie";
 import { headers } from "next/headers";
 import { clientIp } from "@/lib/net";
@@ -20,7 +21,7 @@ export async function generateMetadata() {
 const LIMIT = 200;
 
 export default async function Search({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
-  await gate("read");
+  const user = await gate("read");
   const raw = (await searchParams).q;
   const q = (typeof raw === "string" ? raw : "").slice(0, MAX_QUERY);
   const t = await getT();
@@ -33,7 +34,12 @@ export default async function Search({ searchParams }: { searchParams: Promise<{
     if (!(await consume(bucket, user || ip ? 240 : 3000, 60))) error = t("Slow down a little.");
     else {
       try {
-        result = await search(q, { limit: LIMIT, budgetMs: 800, local: await localVersions(await getLang()) });
+        result = await search(q, {
+          level: levelOf(user),
+          limit: LIMIT,
+          budgetMs: 800,
+          local: await localVersions(await getLang()),
+        });
       } catch (e) {
         if (e instanceof HttpError) error = t(e.message);
         else throw e;

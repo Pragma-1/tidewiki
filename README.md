@@ -49,6 +49,9 @@
 - Links to other sites open in a new tab (`rel="noopener"`), internal links stay put.
 - German and English: every reader picks with the _DE/EN_ button (a cookie), the owner sets the default for everyone else and for e-mails. The built-in pages follow the reader's language until someone edits them.
 - Version history with a line diff, restore of any version, edit summaries, and a "recent changes" feed.
+- **Private pages and sections.** _Sichtbarkeit_ on a page: everyone who can read the wiki, administrators and the owner, or only the owner — the level covers the page's sub-pages too. A private page doesn't exist for anyone else: not in the menu, search, lists, history, live updates or exports, and its address answers "not found".
+- **Shared links.** _Teilen_ makes a read-only link to a page, or to a page with its sub-pages, that works without an account — also when the wiki isn't readable without signing in. It expires (1 day to 1 year, or until revoked), can be revoked any time, and is listed under _Einstellungen → Sicherheit_.
+- **PDF.** Every page can be saved as a PDF: A4, with the wiki's fonts, bookmarks for the headings, page numbers, tables, highlighted code, callouts and the page's pictures.
 - A trash: deleted pages keep their whole history for 30 days.
 - _Seiten verwalten_: all pages as a tree with checkboxes to delete many at once (a chapter ticks its sub-pages, shift-click selects a range, filter). Editors delete their own pages, administrators any — all or nothing.
 - Import and export: single pages as `.md`, the whole wiki as a ZIP (pages, chapters as folders, media), new pages straight from a `.md` file. Before importing a ZIP you can arrange it: change the order, make pages main pages or sub-pages, put them under an existing page, rename them or leave them out.
@@ -71,7 +74,7 @@
 
 **Accounts and security**
 
-- Roles: owner, administrator, editor, viewer. Public read-only mode or a fully private wiki.
+- Roles: owner, administrator, editor, viewer. Public read-only mode or a fully private wiki; single pages and sections private to administrators or the owner.
 - Argon2id passwords with a server-side pepper and a configurable password policy.
 - TOTP two-factor authentication with **several devices** per account and single-use recovery codes, **required per role**.
 - Escalating lock-out (10 min → 24 h), session overview with sign-out per device, self-service profile changes.
@@ -246,6 +249,9 @@ S3 storage for backups is set up in the wiki (_Einstellungen → Sicherungen_), 
     | Download, upload, delete; storage location (password) |   ✓   |       —       |        —        |
 
   - **The master key is not part of a backup** and is needed to read one. Keep it separately (a password manager, printed in a safe) — a backup without its key is worthless, and a key next to its backups protects nothing.
+- **Private pages.** _Sichtbarkeit_ (administrators) sets who may see a page: everyone who can read the wiki, administrators and the owner, or only the owner (only the owner sets that one). It covers the page's sub-pages; a sub-page can be made more private, never more open than its chapter. New pages under a private chapter are private right away, and moving a page never makes it more visible — it keeps the level it had; making it public again is a deliberate change of its visibility. When a private chapter is deleted, its sub-pages keep the level. Exports, imports, backups (pages listed in a backup and single-page restores) and the media library follow the same rule, so administrators never see pages, versions or pictures that are only the owner's.
+- **Shared links.** _Teilen_ (administrators) on a page makes a link like `https://wiki.example/s/…` that opens the page — or the page with its sub-pages — read-only, without an account, even when signed-out visitors can't read the wiki. The visitor sees only the shared pages (no menu of the wiki, no search, no names of authors) and can save them as PDF; pictures come through the link, nothing else of the media library does. Sub-pages more private than the shared page are not part of a section link. A link stops working when it expires or is revoked, when its page is deleted, when the page becomes more private than the link's maker may see, and when its maker is no longer an administrator. The link is shown once — the wiki keeps only a fingerprint (SHA-256), so a stolen database or backup holds no working links. Links aren't part of backups.
+- **PDF.** _PDF_ on every page (also for signed-out readers when the wiki is public, and in a shared view): A4 with Inter and JetBrains Mono embedded, the page title, date and version on top, page numbers and the page address in the footer, headings as bookmarks, tables with repeated header rows, highlighted code, callouts, task lists, footnotes and the page's PNG and JPEG pictures (other formats and videos become links). Nothing is ever fetched from elsewhere. A PDF is laid out in the background (at most two at a time, at most 45 s) and kept for a while, so a long page never slows the wiki down.
 - **Security log.** Every entry has an ID (`EV-000123`) and can be searched by ID, event, user, IP and details, filtered by category, user and date, and exported as CSV or JSON.
 
 ## Writing pages

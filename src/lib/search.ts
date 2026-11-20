@@ -1,3 +1,4 @@
+import { hiddenPages, visibleId, type Level } from "./access";
 import MarkdownIt, { type Token } from "markdown-it";
 import { all, one, run, sql, tx, type Sql } from "./db";
 import { HttpError } from "./validate";
@@ -307,11 +308,13 @@ const MAX_CANDIDATES = 3000;
 export async function search(
   q: string,
   opts: {
+    /** the reader's level: private pages beyond it are never searched */
+    level: Level;
     limit?: number;
     budgetMs?: number;
     /** Built-in pages shown in the reader's language (slug → shown title and text): searched as shown. */
     local?: Map<string, { title: string; content: string }>;
-  } = {},
+  },
 ): Promise<SearchResult> {
   const terms = parseQuery(q);
   if (!terms.length) return { hits: [], total: 0, partial: false };
@@ -329,12 +332,14 @@ export async function search(
     });
     // unedited built-in pages the reader sees in another language than stored: matched, ranked and
     // highlighted in the text they actually see (at most a handful, checked here instead of in SQL)
+    const hidden = await hiddenPages(opts.level);
     const shown = new Map<number, { title: string; plain: string; ftitle: string; fbody: string }>();
     if (opts.local?.size) {
       const rows = await all<{ id: number; slug: string }>(
         sql`SELECT id, slug FROM pages WHERE slug = ANY(${[...opts.local.keys()]}::text[])`,
       );
       for (const r of rows) {
+        if (hidden.has(r.id)) continue;
         const v = opts.local.get(r.slug)!;
         const plain = markdownToPlain(v.content).slice(0, MAX_PLAIN);
         shown.set(r.id, { title: v.title, plain, ftitle: fold(v.title), fbody: fold(plain) });
@@ -343,7 +348,8 @@ export async function search(
     const ids = [
       ...(
         await all<{ id: number }>(
-          sql`SELECT page_id AS id FROM search_idx WHERE ${sql.join(where, sql` AND `)} LIMIT ${MAX_CANDIDATES}`,
+          sql`SELECT page_id AS id FROM search_idx WHERE ${sql.join(where, sql` AND `)}
+              AND ${visibleId(sql`page_id`, hidden)} LIMIT ${MAX_CANDIDATES}`,
         )
       )
         .map((r) => r.id)

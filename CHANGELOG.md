@@ -4,6 +4,21 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-11-20
+
+### Added
+
+- **Private pages and sections.** _Sichtbarkeit_ on a page (administrators): everyone who can read the wiki, administrators and the owner, or only the owner (the owner's choice alone). The level covers the page's sub-pages; a sub-page can only be made more private. A private page doesn't exist for anyone below its level — menu, home page, search (title and text), recent changes, history, “linked from”, previous/next, page manager, trash, live updates, Markdown and PDF downloads, the editor, exports, imports, backups and the media library all leave it out, and its address answers “not found” (same as an unused one). Pictures only private pages show are private too. New pages under a private chapter are private at once; moving a page never makes it more visible; deleting a private chapter keeps its sub-pages private. A lock marks private pages in the menu, a badge on the page says who may see it and where the level comes from. Exports carry `access:` in the front matter, so a re-import keeps pages private (never beyond the importer's own level).
+- **Shared links.** _Teilen_ on a page (administrators) makes a read-only link for the page, or the page with its sub-pages, that works without an account — also when signed-out visitors can't read the wiki, and also for private pages (the dialog says so). Valid for 1, 7, 30 or 90 days, a year, or until revoked; at most 20 working links per page. The visitor sees only the shared pages (with their own navigation for a section, previous/next, PDF download) and their pictures; never the menu, search, authors or anything else. Links are 256-bit random tokens of which only the SHA-256 is stored; shown once when made. They stop working when they expire or are revoked, the page is deleted (a restore doesn't bring them back), the page becomes more private than their maker may see, or the maker is no longer an administrator or is disabled. _Einstellungen → Sicherheit → Geteilte Links_ lists every working link with its use count and last use, to revoke one or all. Shared pages are `noindex`, the token never leaves in a `Referer`, failed look-ups all answer the same 404, and look-ups are rate-limited per address. Making and revoking links is in the security log.
+- **Save as PDF.** Every page has a _PDF_ button (readers, signed-out readers of a public wiki, visitors of a shared link). The PDF is laid out on the server: A4, Inter and JetBrains Mono embedded (German, Greek, Cyrillic …), title block, page numbers, headings as PDF bookmarks, internal jumps for `#anchors` and footnotes, tables with repeated header rows and sensible column widths, syntax-highlighted code that wraps at the margin, callouts, quotes, task lists, definition lists, and the page's PNG/JPEG pictures (scaled to the page, metadata stripped once more). Other image formats, external images, videos and embeds become links — the PDF export never loads anything from the network and may only read its fonts. Layout runs in a worker thread with a 45-second and 512 MB limit, at most two at a time, finished PDFs are cached, and requests are rate-limited, so even the longest page can't slow the wiki down. The file name is the page title.
+
+### Changed
+
+- **Database schema 2** (applied automatically at start-up): an access level per page and per page in the trash, and the shared links. Backups made by earlier versions restore fine (every page visible to all, as it was); a database at schema 2 can't be opened by an older Tidewiki.
+- Live updates no longer carry page titles, and each reader only hears about pages they may see. The event connection is renewed every 10 minutes, so a changed role takes effect there too.
+- The personal-data download lists a person's versions with the titles they wrote; private pages beyond the downloader's level appear without their address.
+- New dependencies: `pdfmake` 0.3.13 (with `pdfkit` 0.20.2), `fontkit` 2.0.4, and the TrueType fonts of Inter and JetBrains Mono (`@expo-google-fonts`, SIL Open Font License) — all published at least two weeks before.
+
 ## [2.1.1] — 2026-11-20
 
 ### Fixed

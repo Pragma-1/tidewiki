@@ -6,6 +6,7 @@ import { listTrash, TRASH_DAYS } from "@/lib/trash";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
 import { now } from "@/lib/db";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
   return { title: (await getT())("Trash") };
@@ -15,7 +16,7 @@ export default async function Trash() {
   const user = (await gate("edit"))!; // editors and up only
   const lang = await getLang();
   const t = makeT(lang);
-  const rows = await listTrash();
+  const rows = await listTrash(levelOf(user));
   const isAdmin = user.role === "admin";
   const daysLeft = (deletedAt: number) => Math.max(0, Math.ceil((deletedAt + TRASH_DAYS * 86400 - now()) / 86400));
   return (

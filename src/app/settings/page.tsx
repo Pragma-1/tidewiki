@@ -18,6 +18,9 @@ import { AuditLog } from "@/components/audit-log";
 import { LegalEditor } from "@/components/legal-editor";
 import { MediaPanel } from "@/components/media-panel";
 import { AppearancePanel } from "@/components/appearance-panel";
+import { listShares } from "@/lib/shares";
+import { SharesOverview } from "@/components/access-share";
+import { levelOf } from "@/lib/access";
 import { appearanceFrom } from "@/lib/appearance";
 import { DataPanel } from "@/components/data-panel";
 import { BackupsPanel } from "@/components/backups-panel";
@@ -31,7 +34,7 @@ import { localTree, localVersions } from "@/lib/system-pages";
 import { statSync } from "node:fs";
 import { all, sql } from "@/lib/db";
 import { enabledLegalKeys, missingOperatorFields } from "@/lib/legal";
-import { listMedia, mediaUsage } from "@/lib/media";
+import { listMedia, mediaUsage, privateMedia } from "@/lib/media";
 import { gate } from "@/lib/guard";
 import { getSettings, settingsForClient } from "@/lib/settings";
 import { listUsers } from "@/lib/admin";
@@ -68,6 +71,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const cfg = settingsForClient(await getSettings(), user.isOwner);
   const users = await listUsers();
   const locked = users.filter((u) => u.locked_until).length;
+  // files only private pages beyond this person's level show are left out, like those pages
+  const priv = tab === "appearance" || tab === "media" ? await privateMedia(levelOf(user)) : new Set<string>();
   const tabs: { id: Tab; label: string; icon: typeof Users; badge?: number }[] = [
     { id: "general", label: t("General"), icon: SlidersHorizontal },
     { id: "appearance", label: t("Appearance"), icon: Palette },
@@ -121,16 +126,21 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           initialCss={cfg.custom_css}
           isOwner={user.isOwner}
           images={(await listMedia())
-            .filter((m) => m.kind === "image" && m.mime !== "image/svg+xml")
+            .filter((m) => m.kind === "image" && m.mime !== "image/svg+xml" && !priv.has(m.name))
             .map((m) => ({ name: m.name, title: m.original_name ?? m.name }))}
         />
       )}
       {tab === "security" && (
-        <SettingsPanel
-          initial={cfg}
-          group="security"
-          locked={ROLES.filter((r) => !canSetMfaFor(user, r)).map((r) => MFA_SETTING[r])}
-        />
+        <>
+          <SettingsPanel
+            initial={cfg}
+            group="security"
+            locked={ROLES.filter((r) => !canSetMfaFor(user, r)).map((r) => MFA_SETTING[r])}
+          />
+          <div style={{ marginTop: "1.25rem" }}>
+            <SharesOverview initial={await listShares(levelOf(user))} />
+          </div>
+        </>
       )}
       {tab === "mail" && (
         <MailPanel
@@ -183,7 +193,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               walk(n.children, d + 1);
             }
           };
-          walk(localTree(await getTree(), await localVersions(await getLang())), 1);
+          walk(localTree(await getTree(levelOf(user)), await localVersions(await getLang())), 1);
           return <DataPanel pages={flat} maxDepth={LIMITS.maxPageDepth} />;
         })())}
       {tab === "backups" &&
@@ -266,7 +276,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             </>
           );
         })())}
-      {tab === "media" && <MediaPanel files={await listMedia()} {...await mediaUsage()} />}
+      {tab === "media" && (
+        <MediaPanel files={(await listMedia()).filter((m) => !priv.has(m.name))} {...await mediaUsage()} />
+      )}
       {tab === "log" && (
         <AuditLog
           initial={await queryAudit({ limit: 50 })}

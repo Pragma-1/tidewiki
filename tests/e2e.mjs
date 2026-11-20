@@ -979,6 +979,294 @@ try {
     "rail offers 'Import .md' next to 'New page'",
   );
 
+  console.log("• private pages, shared links, PDF");
+  {
+    // a second administrator (not the owner) and an editor
+    for (const [username, role] of [
+      ["anna", "admin"],
+      ["eddi", "editor"],
+    ])
+      await admin.req("POST", "/api/users", { username, email: `${username}@example.com`, role, password: PW });
+    const anna = new Client(),
+      eddi = new Client();
+    await anna.req("POST", "/api/auth/login", { username: "anna", password: PW });
+    await eddi.req("POST", "/api/auth/login", { username: "eddi", password: PW });
+    const mk = async (title, content, parentId = null) =>
+      (await admin.req("POST", "/api/pages", { title, content, parentId })).json.slug;
+    const idOf = async (slug) => {
+      const t = (await admin.req("GET", "/pages")).text;
+      return Number(new RegExp(`\\\\?"id\\\\?":(\\d+),\\\\?"slug\\\\?":\\\\?"${slug}\\\\?"`).exec(t)?.[1] ?? NaN);
+    };
+    const secSlug = await mk("Vorstandssache", "Geheime Beschlüsse VORSTAND-XYZ");
+    const secPage = await admin.req("GET", `/w/${secSlug}`);
+    ok(secPage.status === 200 && secPage.text.includes("Sichtbarkeit"), "administrators get a visibility button");
+    const vis = await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "admins" });
+    ok(vis.status === 200 && vis.json.access === "admins", `a page is made private (${vis.status} ${vis.text})`);
+    ok(
+      (await anna.req("PUT", `/api/pages/${secSlug}/access`, { access: "owner" })).status === 403,
+      "only the owner can make a page owner-only",
+    );
+    ok(
+      (await eddi.req("PUT", `/api/pages/${secSlug}/access`, { access: "all" })).status === 403 &&
+        (await anon.req("PUT", `/api/pages/${secSlug}/access`, { access: "all" })).status === 401,
+      "editors and visitors can't change visibility",
+    );
+    ok(
+      (await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "everyone" })).status === 400 &&
+        (await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: ["admins"] })).status === 400,
+      "invalid visibility values are refused",
+    );
+    // the sub-page inherits
+    const secId = await idOf(secSlug);
+    ok(Number.isSafeInteger(secId), `the private page's id is known (${secId})`);
+    const subRes = await admin.req("POST", "/api/pages", {
+      title: "Protokoll Unterseite",
+      content: "PROTOKOLL-123",
+      parentId: secId,
+    });
+    ok(
+      (await eddi.req("POST", "/api/pages", { title: "Hineingeschmuggelt", content: "x", parentId: secId })).status ===
+        400,
+      "an editor can't file a page under a private chapter",
+    );
+    const subSlug = subRes.json?.slug;
+    // find the private page's id from the page manager (admins see it)
+    const pm = await admin.req("GET", "/pages");
+    ok(pm.status === 200 && pm.text.includes("Vorstandssache"), "the page manager lists private pages for admins");
+    for (const [who, c] of [
+      ["visitor", anon],
+      ["editor", eddi],
+      ["viewer", bob],
+    ]) {
+      const r = await c.req("GET", `/w/${secSlug}`);
+      ok(r.status === 404 && !r.text.includes("VORSTAND-XYZ"), `${who}: a private page is “not found”`);
+      const home = await c.req("GET", "/");
+      ok(!home.text.includes("Vorstandssache"), `${who}: not in the menu or lists`);
+      const hits = await c.req("GET", "/api/search?q=VORSTAND-XYZ");
+      ok(hits.status !== 200 || hits.json.hits.length === 0, `${who}: not found by search`);
+      for (const u of [`/api/pages/${secSlug}/export`, `/api/pages/${secSlug}/pdf`, `/w/${secSlug}/history`])
+        ok([401, 404, 307].includes((await c.req("GET", u)).status), `${who}: ${u} is closed`);
+    }
+    ok(
+      (
+        await eddi.req("PUT", `/api/pages/${secSlug}`, {
+          title: "x",
+          content: "überschrieben",
+          parentId: null,
+          expectedRev: 1,
+        })
+      ).status === 404 && (await eddi.req("DELETE", `/api/pages/${secSlug}`)).status === 404,
+      "an editor can't edit or delete a private page by its address",
+    );
+    ok((await eddi.req("DELETE", "/api/pages", { slugs: [secSlug] })).json?.trashed === 0, "…nor in bulk");
+    ok((await anna.req("GET", `/w/${secSlug}`)).status === 200, "another administrator sees it");
+    const own = await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "owner" });
+    ok(own.status === 200, "the owner makes it owner-only");
+    ok(
+      (await anna.req("GET", `/w/${secSlug}`)).status === 404 &&
+        !(await anna.req("GET", "/changes")).text.includes("Vorstandssache"),
+      "owner-only: hidden from other administrators too",
+    );
+    const sseBody = async (c) => {
+      const ac = new AbortController();
+      const res = await fetch(`${BASE}/api/events`, {
+        headers: {
+          cookie: Object.entries(c.jar)
+            .map(([k, v]) => `${k}=${v}`)
+            .join("; "),
+        },
+        signal: ac.signal,
+      });
+      const reader = res.body.getReader();
+      let got = "";
+      const t0 = Date.now();
+      const pump = (async () => {
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            got += new TextDecoder().decode(value);
+          }
+        } catch {}
+      })();
+      return {
+        stop: async () => {
+          await sleep(Math.max(0, 400 - (Date.now() - t0)));
+          ac.abort();
+          await pump;
+          return got;
+        },
+      };
+    };
+    const evAnon = await sseBody(anon),
+      evOwner = await sseBody(admin);
+    await sleep(150);
+    const r0 = (await admin.req("GET", `/w/${secSlug}/edit`)).text.match(/\\?"rev\\?":(\d+)/)?.[1];
+    await admin.req("PUT", `/api/pages/${secSlug}`, {
+      title: "Vorstandssache",
+      content: "Neue Beschlüsse VORSTAND-XYZ",
+      parentId: null,
+      expectedRev: Number(r0),
+    });
+    const [ga, go] = [await evAnon.stop(), await evOwner.stop()];
+    ok(go.includes(secSlug) && !ga.includes(secSlug), "live updates of a private page reach only those who see it");
+    ok(!go.includes("Vorstandssache"), "live updates never carry titles");
+    await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "admins" });
+
+    // shared links (the wiki itself closed to visitors)
+    await admin.req("PUT", "/api/settings", { public_read: false });
+    ok((await anon.req("GET", `/w/${secSlug}`)).status === 307, "wiki closed: visitors are sent to sign in");
+    ok(
+      (await eddi.req("POST", `/api/pages/${secSlug}/shares`, { section: false, days: 7 })).status === 403 &&
+        (await anon.req("POST", `/api/pages/${secSlug}/shares`, { section: false, days: 7 })).status === 401,
+      "only administrators make shared links",
+    );
+    ok(
+      (await admin.req("POST", `/api/pages/${secSlug}/shares`, { section: false, days: 5 })).status === 400 &&
+        (await admin.req("POST", `/api/pages/${secSlug}/shares`, { section: "yes", days: 7 })).status === 400 &&
+        (
+          await admin.req(
+            "POST",
+            `/api/pages/${secSlug}/shares`,
+            { section: false, days: 7 },
+            { origin: "https://evil.example" },
+          )
+        ).status === 403,
+      "share creation checks its input and is CSRF-protected",
+    );
+    const sh = await admin.req("POST", `/api/pages/${secSlug}/shares`, { section: true, days: 7 });
+    ok(sh.status === 201 && /\/s\/[A-Za-z0-9_-]{43}$/.test(sh.json.url), `a shared link is made (${sh.status})`);
+    const token = sh.json.url.split("/s/")[1];
+    const visitor = new Client();
+    const sv = await visitor.req("GET", `/s/${token}`);
+    ok(
+      sv.status === 200 && sv.text.includes("VORSTAND-XYZ") && sv.text.includes("Per Link mit Ihnen geteilt"),
+      `a visitor without an account reads the shared page (${sv.status})`,
+    );
+    ok(
+      /<meta name="robots" content="noindex, nofollow"/.test(sv.text) &&
+        sv.headers.get("x-robots-tag") === "noindex, nofollow",
+      "shared pages are kept out of search engines",
+    );
+    ok(sv.headers.get("referrer-policy") === "no-referrer", "the link's token never leaves in a Referer header");
+    ok(
+      !/class="tree"[^]*Handbuch/.test(sv.text) && !sv.text.includes("/settings") && !sv.text.includes("Abmelden"),
+      "the shared view shows nothing else of the wiki",
+    );
+    ok(
+      (await visitor.req("GET", `/s/${token}/${subSlug}`)).text.includes("PROTOKOLL-123"),
+      "a section link opens the sub-pages",
+    );
+    ok((await eddi.req("GET", `/w/${subSlug}`)).status === 404, "the sub-page of a private page is private too");
+    const other = await mk("Andere Seite", "ANDERE-SEITE-ABC");
+    for (const u of [`/s/${token}/${other}`, `/s/${token}/..%2F..%2Fw%2F${other}`, `/s/${token}/${other}?x=1`])
+      ok(
+        [404, 307].includes((await visitor.req("GET", u)).status) &&
+          !(await visitor.req("GET", u)).text.includes("ANDERE-SEITE-ABC"),
+        `pages outside the share stay closed (${u.slice(0, 60)})`,
+      );
+    for (const bad of [
+      token.slice(0, -1) + (token.at(-1) === "A" ? "B" : "A"),
+      token.slice(0, 42),
+      `${token}x`,
+      "x".repeat(43),
+    ])
+      ok(
+        (await visitor.req("GET", `/s/${bad}`)).status === 404,
+        `a wrong token is simply not found (${bad.slice(0, 6)}…)`,
+      );
+    const spdf = await visitor.req("GET", `/s/pdf/${token}/${secSlug}`, undefined, { raw: true });
+    const spdfBuf = Buffer.from(await spdf.arrayBuffer());
+    ok(
+      spdf.status === 200 &&
+        spdf.headers.get("content-type") === "application/pdf" &&
+        spdfBuf.subarray(0, 5).toString() === "%PDF-" &&
+        !spdfBuf.toString("latin1").includes(token),
+      "the visitor saves it as PDF (and the PDF doesn't carry the link's token)",
+    );
+    ok((await visitor.req("GET", `/s/pdf/${token}/${other}`)).status === 404, "…but no PDF of pages outside the share");
+    // files through the share: only those its pages show
+    const shImg = await up(admin, fx("meta.png"), "plan.png");
+    const shImgName = shImg.json.url.split("/").pop();
+    const r1 = (await admin.req("GET", `/w/${secSlug}/edit`)).text.match(/\\?"rev\\?":(\d+)/)?.[1];
+    await admin.req("PUT", `/api/pages/${secSlug}`, {
+      title: "Vorstandssache",
+      content: `Neue Beschlüsse VORSTAND-XYZ\n\n![Plan](${shImg.json.url})`,
+      parentId: null,
+      expectedRev: Number(r1),
+    });
+    const sv2 = await visitor.req("GET", `/s/${token}`);
+    ok(sv2.text.includes(`/s/media/${token}/${shImgName}`), "images of a shared page come through the share");
+    ok(
+      (await visitor.req("GET", `/s/media/${token}/${shImgName}`, undefined, { raw: true })).status === 200 &&
+        (await visitor.req("GET", `/media/${shImgName}`)).status === 401,
+      "…while the media library stays closed",
+    );
+    const otherImg = (await up(admin, fx("exif.jpg"), "privat.jpg")).json.url.split("/").pop();
+    ok(
+      (await visitor.req("GET", `/s/media/${token}/${otherImg}`)).status === 404 &&
+        (await visitor.req("GET", `/s/media/${token}/..%2F..%2Fetc%2Fpasswd`)).status === 404 &&
+        (await visitor.req("GET", `/s/media/${"A".repeat(43)}/${shImgName}`)).status === 404,
+      "no other files through a share, no path tricks, no file without a valid link",
+    );
+    // listing and revoking
+    const list = await admin.req("GET", `/api/pages/${secSlug}/shares`);
+    ok(
+      list.status === 200 && list.json.links.length === 1 && !JSON.stringify(list.json).includes(token),
+      "the link list never shows the token again",
+    );
+    ok((await eddi.req("GET", "/api/shares")).status === 403, "editors can't list links");
+    const sec = await admin.req("GET", "/settings?tab=security");
+    ok(sec.status === 200 && sec.text.includes("Geteilte Links"), "settings → security lists shared links");
+    // the page becomes owner-only: anna's link would die; the owner's stays
+    const annaLink = (await anna.req("POST", `/api/pages/${secSlug}/shares`, { section: false, days: 1 })).json.url;
+    await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "owner" });
+    ok(
+      (await visitor.req("GET", annaLink.replace(BASE, ""))).status === 404 &&
+        (await visitor.req("GET", `/s/${token}`)).status === 200,
+      "a link stops working when its maker may no longer see the page",
+    );
+    ok(
+      (await anna.req("DELETE", `/api/shares/${list.json.links[0].id}`)).status === 404,
+      "an administrator can't revoke links of pages they can't see",
+    );
+    const rv = await admin.req("DELETE", `/api/shares/${list.json.links[0].id}`);
+    ok(rv.status === 200 && (await visitor.req("GET", `/s/${token}`)).status === 404, "a revoked link is dead at once");
+    ok((await admin.req("DELETE", `/api/shares/${list.json.links[0].id}`)).status === 404, "revoking twice: not found");
+    const al2 = await admin.req("GET", "/api/audit?q=share&limit=20");
+    ok(
+      al2.json.rows.some((r) => r.event === "page.share_created") &&
+        al2.json.rows.some((r) => r.event === "page.share_revoked"),
+      "making and revoking links is logged",
+    );
+    await admin.req("PUT", "/api/settings", { public_read: true });
+
+    // PDF of an ordinary page
+    const pdf = await anon.req("GET", `/api/pages/${other}/pdf`, undefined, { raw: true });
+    const pdfBuf = Buffer.from(await pdf.arrayBuffer());
+    ok(
+      pdf.status === 200 &&
+        pdf.headers.get("content-type") === "application/pdf" &&
+        /^attachment; filename="Andere-Seite\.pdf"; filename\*=UTF-8''Andere%20Seite\.pdf$/.test(
+          pdf.headers.get("content-disposition"),
+        ) &&
+        /sandbox/.test(pdf.headers.get("content-security-policy")) &&
+        pdfBuf.subarray(0, 5).toString() === "%PDF-",
+      `readers save pages as PDF (${pdf.status} ${pdf.headers.get("content-disposition")})`,
+    );
+    ok(
+      (await admin.req("GET", `/w/${other}`)).text.includes(`/api/pages/${other}/pdf`),
+      "pages offer the PDF download",
+    );
+    ok((await anon.req("GET", "/api/pages/gibt-es-nicht/pdf")).status === 404, "PDF of a missing page: not found");
+    ok((await anon.req("GET", "/api/pages/..%2Fetc/pdf")).status === 404, "PDF: odd addresses are refused");
+    await admin.req("PUT", "/api/settings", { public_read: false });
+    ok((await anon.req("GET", `/api/pages/${other}/pdf`)).status === 401, "wiki closed: no PDF for visitors");
+    await admin.req("PUT", "/api/settings", { public_read: true });
+    await admin.req("PUT", `/api/pages/${secSlug}/access`, { access: "all" });
+    ok((await anon.req("GET", `/w/${secSlug}`)).status === 200, "made public again, it's visible again");
+  }
+
   console.log("• trash, versions, backups");
   {
     const rawz = (c, method, url, body, origin = BASE) =>

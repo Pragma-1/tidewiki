@@ -31,10 +31,18 @@ import { editComment } from "@/lib/validate";
 const t0 = Math.floor(Date.now() / 1000);
 const uid = await addUser("tr", "editor");
 const mk = (title: string, content = "", parentId: number | null = null) =>
-  createPage({ title, content, parentId, userId: uid });
+  createPage({ level: 2, title, content, parentId, userId: uid });
 const save = async (slug: string, content: string, comment?: string) => {
   const p = (await getPage(slug))!;
-  return updatePage(slug, { title: p.title, content, parentId: p.parent_id, expectedRev: p.rev, userId: uid, comment });
+  return updatePage(slug, {
+    level: 2,
+    title: p.title,
+    content,
+    parentId: p.parent_id,
+    expectedRev: p.rev,
+    userId: uid,
+    comment,
+  });
 };
 
 describe("trash", () => {
@@ -46,20 +54,20 @@ describe("trash", () => {
     const revIdsBefore = (
       (await db().prepare("SELECT id FROM page_revisions WHERE page_id=? ORDER BY rev").all(p.id)) as { id: number }[]
     ).map((r) => r.id);
-    expect((await backlinks(target.slug)).map((b) => b.slug)).toContain(p.slug);
-    expect((await search("zebrafink")).hits.map((h) => h.slug)).toEqual([p.slug]);
+    expect((await backlinks(target.slug, 2)).map((b) => b.slug)).toContain(p.slug);
+    expect((await search("zebrafink", { level: 2 })).hits.map((h) => h.slug)).toEqual([p.slug]);
 
     expect((await trashPage(p.slug, uid))?.id).toBe(p.id);
     expect(await getPage(p.slug)).toBeUndefined();
     expect(await db().prepare("SELECT COUNT(*) AS n FROM page_revisions WHERE page_id=?").get(p.id)).toEqual({ n: 0 });
-    expect((await search("zebrafink")).hits).toEqual([]);
-    expect((await backlinks(target.slug)).map((b) => b.slug)).not.toContain(p.slug);
-    expect((await recentChanges(200)).some((r) => r.slug === p.slug)).toBe(false);
-    const row = (await listTrash()).find((r) => r.slug === p.slug)!;
+    expect((await search("zebrafink", { level: 2 })).hits).toEqual([]);
+    expect((await backlinks(target.slug, 2)).map((b) => b.slug)).not.toContain(p.slug);
+    expect((await recentChanges(2, 200)).some((r) => r.slug === p.slug)).toBe(false);
+    const row = (await listTrash(2)).find((r) => r.slug === p.slug)!;
     expect(row).toMatchObject({ title: "Papierkorbtest", rev: 3, deleted_by_name: "tr" });
     expect(await trashPage(p.slug, uid)).toBeNull(); // second delete: nothing there
 
-    const { page, slugChanged } = await restoreFromTrash(row.id);
+    const { page, slugChanged } = await restoreFromTrash(row.id, 2);
     expect(slugChanged).toBe(false);
     expect(page).toMatchObject({ id: p.id, slug: p.slug, rev: 3, content: "dritte Fassung Zebrafink [[Ziel]]" });
     const revs = await listRevisions(page.id);
@@ -71,10 +79,10 @@ describe("trash", () => {
         (await db().prepare("SELECT id FROM page_revisions WHERE page_id=? ORDER BY rev").all(p.id)) as { id: number }[]
       ).map((r) => r.id),
     ).toEqual(revIdsBefore);
-    expect((await search("zebrafink")).hits.map((h) => h.slug)).toEqual([p.slug]);
-    expect((await backlinks(target.slug)).map((b) => b.slug)).toContain(p.slug);
-    expect(await getTrashItem(row.id)).toBeUndefined();
-    await expect(restoreFromTrash(row.id)).rejects.toThrow(/no longer in the trash/);
+    expect((await search("zebrafink", { level: 2 })).hits.map((h) => h.slug)).toEqual([p.slug]);
+    expect((await backlinks(target.slug, 2)).map((b) => b.slug)).toContain(p.slug);
+    expect(await getTrashItem(row.id, 2)).toBeUndefined();
+    await expect(restoreFromTrash(row.id, 2)).rejects.toThrow(/no longer in the trash/);
   });
 
   it("restores under a new address if the old one was taken, and re-files sub-pages and chapter", async () => {
@@ -85,11 +93,18 @@ describe("trash", () => {
     await trashPage(parent.slug, uid);
     expect((await getPage(kid1.slug))!.parent_id).toBeNull(); // sub-pages stay, at the top level
     // meanwhile: someone files kid2 elsewhere and creates a new page at the old address
-    await updatePage(kid2.slug, { title: "Kind zwei", content: "", parentId: chapter.id, expectedRev: 1, userId: uid });
+    await updatePage(kid2.slug, {
+      level: 2,
+      title: "Kind zwei",
+      content: "",
+      parentId: chapter.id,
+      expectedRev: 1,
+      userId: uid,
+    });
     const squatter = await mk("Elternseite");
     expect(squatter.slug).toBe(parent.slug);
-    const item = (await listTrash()).find((r) => r.page_id === parent.id)!;
-    const { page, slugChanged } = await restoreFromTrash(item.id);
+    const item = (await listTrash(2)).find((r) => r.page_id === parent.id)!;
+    const { page, slugChanged } = await restoreFromTrash(item.id, 2);
     expect(slugChanged).toBe(true);
     expect(page.slug).toBe(`${parent.slug}-2`);
     expect(page.parent_id).toBe(chapter.id);
@@ -102,8 +117,8 @@ describe("trash", () => {
     const p = await mk("Waise", "", ch.id);
     await trashPage(p.slug, uid);
     await trashPage(ch.slug, uid);
-    const item = (await listTrash()).find((r) => r.page_id === p.id)!;
-    expect((await restoreFromTrash(item.id)).page.parent_id).toBeNull();
+    const item = (await listTrash(2)).find((r) => r.page_id === p.id)!;
+    expect((await restoreFromTrash(item.id, 2)).page.parent_id).toBeNull();
   });
 
   it("purges single items, everything, and anything older than 30 days (hourly job)", async () => {
@@ -111,7 +126,7 @@ describe("trash", () => {
       b = await mk("Frisch"),
       c = await mk("Einzeln");
     for (const p of [a, b, c]) await trashPage(p.slug, uid);
-    const ids = Object.fromEntries((await listTrash()).map((r) => [r.slug, r.id]));
+    const ids = Object.fromEntries((await listTrash(2)).map((r) => [r.slug, r.id]));
     await db()
       .prepare("UPDATE trash SET deleted_at=? WHERE id=?")
       .run(now() - 31 * 86400, ids[a.slug]);
@@ -119,29 +134,29 @@ describe("trash", () => {
       .prepare("UPDATE trash SET deleted_at=? WHERE id=?")
       .run(now() - 29 * 86400, ids[b.slug]);
     expect((await purgeExpired()).trash).toBe(1);
-    expect(await getTrashItem(ids[a.slug])).toBeUndefined();
+    expect(await getTrashItem(ids[a.slug], 2)).toBeUndefined();
     expect(await db().prepare("SELECT COUNT(*) AS n FROM trash_revisions WHERE trash_id=?").get(ids[a.slug])).toEqual({
       n: 0,
     });
-    expect(await getTrashItem(ids[b.slug])).toBeDefined();
+    expect(await getTrashItem(ids[b.slug], 2)).toBeDefined();
     expect(await purgeOldTrash()).toBe(0);
-    expect((await purgeTrashItem(ids[c.slug]))?.slug).toBe(c.slug);
-    expect(await purgeTrashItem(ids[c.slug])).toBeUndefined();
-    const n = await trashCount();
+    expect((await purgeTrashItem(ids[c.slug], 2))?.slug).toBe(c.slug);
+    expect(await purgeTrashItem(ids[c.slug], 2)).toBeUndefined();
+    const n = await trashCount(2);
     expect(n).toBeGreaterThan(0);
-    expect(await emptyTrash()).toBe(n);
-    expect(await trashCount()).toBe(0);
+    expect(await emptyTrash(2)).toBe(n);
+    expect(await trashCount(2)).toBe(0);
     expect(await db().prepare("SELECT COUNT(*) AS n FROM trash_revisions").get()).toEqual({ n: 0 });
   });
 
   it("a deleted account doesn't break the trash", async () => {
     const u = await addUser("gone", "editor");
-    const p = await createPage({ title: "Von Gone", content: "x", parentId: null, userId: u });
+    const p = await createPage({ level: 2, title: "Von Gone", content: "x", parentId: null, userId: u });
     await trashPage(p.slug, u);
     await db().prepare("DELETE FROM users WHERE id=?").run(u);
-    const row = (await listTrash()).find((r) => r.page_id === p.id)!;
+    const row = (await listTrash(2)).find((r) => r.page_id === p.id)!;
     expect(row.deleted_by_name).toBeNull();
-    expect((await restoreFromTrash(row.id)).page.created_by).toBeNull();
+    expect((await restoreFromTrash(row.id, 2)).page.created_by).toBeNull();
   });
 
   it("rejects malformed ids", async () => {
@@ -156,19 +171,23 @@ describe("versions", () => {
     const p = await mk("Versioniert", "eins");
     await save(p.slug, "zwei", "Zweiter Entwurf");
     await save(p.slug, "drei");
-    const r = await restoreRevision(p.slug, 1, { expectedRev: 3, userId: uid });
+    const r = await restoreRevision(p.slug, 1, { expectedRev: 3, userId: uid, level: 2 });
     expect(r).toMatchObject({ rev: 4, content: "eins" });
     const v4 = (await getRevision(p.id, 4))!;
     expect(v4.restored_from).toBe(1);
     expect((await getRevision(p.id, 2))!.comment).toBe("Zweiter Entwurf");
     expect((await listRevisions(p.id)).map((x) => x.rev)).toEqual([4, 3, 2, 1]); // nothing overwritten
     // identical → refused; stale editor → conflict; unknown version → 404
-    await expect(restoreRevision(p.slug, 4, { expectedRev: 4, userId: uid })).rejects.toThrow(/identical/);
-    await expect(restoreRevision(p.slug, 1, { expectedRev: 4, userId: uid })).rejects.toThrow(/identical/);
-    await expect(restoreRevision(p.slug, 2, { expectedRev: 3, userId: uid })).rejects.toThrow(/Someone else saved/);
-    await expect(restoreRevision(p.slug, 99, { expectedRev: 4, userId: uid })).rejects.toThrow(/doesn’t exist/);
-    await expect(restoreRevision("nope", 1, { expectedRev: 1, userId: uid })).rejects.toThrow(/not found/);
-    const rc = (await recentChanges(5)).find((x) => x.slug === p.slug && x.rev === 4)!;
+    await expect(restoreRevision(p.slug, 4, { expectedRev: 4, userId: uid, level: 2 })).rejects.toThrow(/identical/);
+    await expect(restoreRevision(p.slug, 1, { expectedRev: 4, userId: uid, level: 2 })).rejects.toThrow(/identical/);
+    await expect(restoreRevision(p.slug, 2, { expectedRev: 3, userId: uid, level: 2 })).rejects.toThrow(
+      /Someone else saved/,
+    );
+    await expect(restoreRevision(p.slug, 99, { expectedRev: 4, userId: uid, level: 2 })).rejects.toThrow(
+      /doesn’t exist/,
+    );
+    await expect(restoreRevision("nope", 1, { expectedRev: 1, userId: uid, level: 2 })).rejects.toThrow(/not found/);
+    const rc = (await recentChanges(2, 5)).find((x) => x.slug === p.slug && x.rev === 4)!;
     expect(rc.restored_from).toBe(1);
   });
 
@@ -198,17 +217,17 @@ describe("deleting several pages at once", () => {
     const subsub = await mk("Bulk Unterunter", "", sub.id);
     const other = await mk("Bulk Andere");
     const kept = await mk("Bulk bleibt", "", ch.id); // not selected: moves to the top level
-    const r = await trashPages([subsub.slug, ch.slug, other.slug, sub.slug, sub.slug], uid, () => true);
+    const r = await trashPages([subsub.slug, ch.slug, other.slug, sub.slug, sub.slug], uid, 2, () => true);
     expect(r.trashed.map((x) => x.slug)).toEqual([subsub.slug, sub.slug, ch.slug, other.slug]);
     expect(r.missing).toBe(1); // the duplicate counts as "already gone", nothing breaks
     expect((await getPage(kept.slug))!.parent_id).toBeNull();
     for (const p of [ch, sub, subsub, other]) expect(await getPage(p.slug)).toBeUndefined();
     // restoring the chapter, then its sub-page, puts them back under each other
-    const items = await listTrash();
+    const items = await listTrash(2);
     const idOf = (slug: string) => items.find((i) => i.slug === slug)!.id;
-    await restoreFromTrash(idOf(ch.slug));
-    await restoreFromTrash(idOf(sub.slug));
-    await restoreFromTrash(idOf(subsub.slug));
+    await restoreFromTrash(idOf(ch.slug), 2);
+    await restoreFromTrash(idOf(sub.slug), 2);
+    await restoreFromTrash(idOf(subsub.slug), 2);
     expect((await getPage(sub.slug))!.parent_id).toBe((await getPage(ch.slug))!.id);
     expect((await getPage(subsub.slug))!.parent_id).toBe((await getPage(sub.slug))!.id);
   });
@@ -216,14 +235,14 @@ describe("deleting several pages at once", () => {
   it("all or nothing: one page the person may not delete and nothing is deleted", async () => {
     const other = await addUser("bulk-other", "editor");
     const mine = await mk("Bulk meins");
-    const theirs = await createPage({ title: "Bulk fremd", content: "", parentId: null, userId: other });
-    await expect(trashPages([mine.slug, theirs.slug], uid, (p) => p.created_by === uid)).rejects.toMatchObject({
+    const theirs = await createPage({ level: 2, title: "Bulk fremd", content: "", parentId: null, userId: other });
+    await expect(trashPages([mine.slug, theirs.slug], uid, 2, (p) => p.created_by === uid)).rejects.toMatchObject({
       status: 403,
     });
     expect(await getPage(mine.slug)).toBeDefined();
     expect(await getPage(theirs.slug)).toBeDefined();
     // pages that don't exist (any more) are just counted
-    const r = await trashPages([mine.slug, "gibt-es-nicht"], uid, (p) => p.created_by === uid);
+    const r = await trashPages([mine.slug, "gibt-es-nicht"], uid, 2, (p) => p.created_by === uid);
     expect(r).toMatchObject({ missing: 1 });
     expect(r.trashed).toHaveLength(1);
   });
@@ -236,10 +255,18 @@ describe("deleting several pages at once", () => {
     // X under B would put X1 on level 4 (the limit is 3)
     const cur = (await getPage(x.slug))!;
     await expect(
-      updatePage(x.slug, { title: cur.title, content: "", parentId: b.id, expectedRev: cur.rev, userId: uid }),
+      updatePage(x.slug, {
+        level: 2,
+        title: cur.title,
+        content: "",
+        parentId: b.id,
+        expectedRev: cur.rev,
+        userId: uid,
+      }),
     ).rejects.toMatchObject({ status: 400 });
     // under A (level 1) it fits: X on 2, X1 on 3
     const ok = await updatePage(x.slug, {
+      level: 2,
       title: cur.title,
       content: "",
       parentId: a.id,

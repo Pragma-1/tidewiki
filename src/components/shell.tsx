@@ -6,6 +6,7 @@ import {
   FileUp,
   History,
   ListChecks,
+  Lock,
   LogIn,
   Settings,
   Trash2,
@@ -16,6 +17,7 @@ import { getCurrentUser } from "@/lib/session-cookie";
 import { getSettings } from "@/lib/settings";
 import { getTree, type TreeNode } from "@/lib/pages";
 import { trashCount } from "@/lib/trash";
+import { levelOf } from "@/lib/access";
 import { getLang } from "@/lib/i18n-server";
 import { localTree, localVersions } from "@/lib/system-pages";
 import { makeT } from "@/lib/i18n";
@@ -26,7 +28,25 @@ import { HeaderSearch } from "./header-search";
 const contains = (n: TreeNode, slug?: string): boolean =>
   !!slug && (n.slug === slug || n.children.some((c) => contains(c, slug)));
 
-function Tree({ nodes, active }: { nodes: TreeNode[]; active?: string }) {
+type LockLabels = { 1: string; 2: string };
+
+/** A private page or section in the menu: a small lock, its meaning for screen readers and on hover. */
+function TreeLink({ n, active, locks }: { n: TreeNode; active?: string; locks: LockLabels }) {
+  const lock = n.access === 1 || n.access === 2 ? locks[n.access] : null;
+  return (
+    <Link href={`/w/${n.slug}`} aria-current={n.slug === active ? "page" : undefined}>
+      {n.title}
+      {lock && (
+        <span className="tree-lock" title={lock}>
+          <Lock size={12} aria-hidden />
+          <span className="sr-only">{lock}</span>
+        </span>
+      )}
+    </Link>
+  );
+}
+
+function Tree({ nodes, active, locks }: { nodes: TreeNode[]; active?: string; locks: LockLabels }) {
   return (
     <ul className="tree">
       {nodes.map((n) => (
@@ -35,16 +55,12 @@ function Tree({ nodes, active }: { nodes: TreeNode[]; active?: string }) {
             <details open={contains(n, active)}>
               <summary>
                 <ChevronRight className="chev" size={16} aria-hidden />
-                <Link href={`/w/${n.slug}`} aria-current={n.slug === active ? "page" : undefined}>
-                  {n.title}
-                </Link>
+                <TreeLink n={n} active={active} locks={locks} />
               </summary>
-              <Tree nodes={n.children} active={active} />
+              <Tree nodes={n.children} active={active} locks={locks} />
             </details>
           ) : (
-            <Link href={`/w/${n.slug}`} aria-current={n.slug === active ? "page" : undefined}>
-              {n.title}
-            </Link>
+            <TreeLink n={n} active={active} locks={locks} />
           )}
         </li>
       ))}
@@ -71,8 +87,9 @@ export async function Shell({
   const t = makeT(lang);
   const canRead = !!user || cfg.public_read;
   const canEdit = !!user && user.role !== "viewer" && !user.needs2faSetup;
-  const tree = canRead ? localTree(await getTree(), await localVersions(lang)) : [];
-  const trashed = canEdit ? await trashCount() : 0;
+  const level = levelOf(user);
+  const tree = canRead ? localTree(await getTree(level), await localVersions(lang)) : [];
+  const trashed = canEdit ? await trashCount(level) : 0;
   return (
     <>
       <a className="skip" href="#main">
@@ -116,7 +133,11 @@ export async function Shell({
         <NavDrawer>
           <h2>{t("Pages")}</h2>
           {tree.length ? (
-            <Tree nodes={tree} active={active} />
+            <Tree
+              nodes={tree}
+              active={active}
+              locks={{ 1: t("Private: administrators and the owner"), 2: t("Private: only the owner") }}
+            />
           ) : (
             <p className="hint" style={{ margin: ".3rem" }}>
               {canRead ? t("No pages yet.") : t("Sign in to read.")}

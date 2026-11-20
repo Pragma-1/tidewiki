@@ -12,4 +12,6 @@ if (!existsSync(standalone)) {
 cpSync(path.join(root, ".next/static"), path.join(standalone, ".next/static"), { recursive: true });
 if (existsSync(path.join(root, "public")))
   cpSync(path.join(root, "public"), path.join(standalone, "public"), { recursive: true });
+// fonts for PDF export, read by the server at run time
+cpSync(path.join(root, "pdf-fonts"), path.join(standalone, "pdf-fonts"), { recursive: true });
 console.log("Static assets copied into .next/standalone");

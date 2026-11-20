@@ -19,6 +19,7 @@ import { pipeline } from "node:stream/promises";
 import { Unzip, UnzipInflate, UnzipPassThrough, Zip, ZipPassThrough } from "fflate";
 import { DATA_DIR } from "./config";
 import { all, one, run, sql, syncIdentity, tx, now, type Sql } from "./db";
+import { effectiveAccess, type Level } from "./access";
 import { SCHEMA_VERSION } from "./schema";
 import { decrypt, encrypt } from "./crypto";
 import { MEDIA_DIR } from "./media";
@@ -125,6 +126,7 @@ export const TABLES = {
     "created_at",
     "updated_at",
     "system_key",
+    "access",
   ],
   page_revisions: ["id", "page_id", "rev", "title", "content", "author_id", "created_at", "comment", "restored_from"],
   media: ["id", "name", "mime", "kind", "size", "original_name", "created_by", "created_at"],
@@ -147,6 +149,7 @@ export const TABLES = {
     "children",
     "deleted_by",
     "deleted_at",
+    "access",
   ],
   trash_revisions: [
     "trash_id",
@@ -162,6 +165,14 @@ export const TABLES = {
   audit_log: ["id", "ts", "user_id", "event", "ip", "detail", "target_id"],
 } as const;
 export type Table = keyof typeof TABLES;
+/**
+ * Columns newer than some backups, with the value they get when restoring an older backup
+ * (backups made before private pages: every page was visible to all readers).
+ */
+const ADDED_COLUMNS: Partial<Record<Table, Record<string, number>>> = {
+  pages: { access: 0 },
+  trash: { access: 0 },
+};
 /** Insert order (foreign keys); pages' parent links are set in a second pass. */
 export const ORDER: readonly Table[] = [
   "users",
@@ -309,7 +320,15 @@ async function sha256File(file: string): Promise<Buffer> {
 
 /* --------------------------------------------------------------- manifest */
 
-export type PageEntry = { id: number; slug: string; title: string; rev: number; parent_id: number | null };
+/** access: the page's effective level when the backup was made (missing in older backups: 0). */
+export type PageEntry = {
+  id: number;
+  slug: string;
+  title: string;
+  rev: number;
+  parent_id: number | null;
+  access?: number;
+};
 export type UserEntry = {
   id: number;
   username: string;
@@ -425,6 +444,7 @@ async function dumpData(id: string, file: string) {
                 title: r.title as string,
                 rev: r.rev as number,
                 parent_id: r.parent_id as number | null,
+                access: r.access as number,
               });
             if (t === "users")
               users.push({
@@ -453,6 +473,14 @@ async function dumpData(id: string, file: string) {
   );
   cipher.end();
   await piping;
+  // effective levels: a sub-page of a private page is private too
+  const byId = new Map(pages.map((p) => [p.id, p]));
+  const eff = (p: PageEntry, d = 0): number =>
+    Math.max(
+      p.access ?? 0,
+      d < 60 && p.parent_id !== null && byId.has(p.parent_id) ? eff(byId.get(p.parent_id)!, d + 1) : 0,
+    );
+  for (const p of pages) p.access = eff(p);
   return { counts, pages, users, media };
 }
 
@@ -615,14 +643,42 @@ async function fetchData(st: BackupStore, id: string, work: string): Promise<str
   return f;
 }
 
+type Layout = Record<Table, { width: number; from: number[]; defaults: unknown[] }>;
+
+/**
+ * How a backup's rows map onto this version's columns, from the column lists in its header. A
+ * backup may lack columns added later (they get their default); it may not have columns this
+ * version doesn't know, or lack any other column — that is a damaged or foreign file.
+ */
+export function recordLayout(tables: unknown): Layout {
+  if (!tables || typeof tables !== "object") throw new HttpError(400, "This backup is damaged.");
+  const out = {} as Layout;
+  for (const t of Object.keys(TABLES) as Table[]) {
+    const cur: readonly string[] = TABLES[t];
+    const raw: unknown = (tables as Record<string, unknown>)[t];
+    const have: unknown = raw === undefined ? cur : raw;
+    if (!Array.isArray(have) || have.length > 64 || !have.every((c) => typeof c === "string"))
+      throw new HttpError(400, "This backup is damaged.");
+    const added = ADDED_COLUMNS[t] ?? {};
+    if (have.some((c) => !cur.includes(c)) || new Set(have).size !== have.length)
+      throw new HttpError(400, "This backup is damaged.");
+    const from = cur.map((c) => have.indexOf(c));
+    if (from.some((i, k) => i < 0 && !Object.hasOwn(added, cur[k])))
+      throw new HttpError(400, "This backup is damaged.");
+    out[t] = { width: have.length, from, defaults: cur.map((c) => (Object.hasOwn(added, c) ? added[c] : null)) };
+  }
+  return out;
+}
+
 /** Streams the records of a (local, encrypted) data file; every record is checked before it is used. */
 async function eachRecord(id: string, file: string, fn: (rec: Rec) => Promise<void> | void) {
   let pending = "";
   let sawHeader = false,
     sawEnd = false;
+  let layout = recordLayout(TABLES);
   const handle = async (line: string) => {
     if (!line) return;
-    let o: { t?: unknown; r?: unknown; format?: unknown; version?: unknown };
+    let o: { t?: unknown; r?: unknown[]; format?: unknown; version?: unknown };
     try {
       o = JSON.parse(line);
     } catch {
@@ -630,6 +686,7 @@ async function eachRecord(id: string, file: string, fn: (rec: Rec) => Promise<vo
     }
     if (o.t === "header") {
       if (o.format !== "tidewiki-backup" || o.version !== 2) throw new HttpError(400, "This backup is damaged.");
+      layout = recordLayout((o as { tables?: unknown }).tables);
       sawHeader = true;
       return;
     }
@@ -641,11 +698,13 @@ async function eachRecord(id: string, file: string, fn: (rec: Rec) => Promise<vo
     const t = o.t as Table;
     if (typeof t !== "string" || !Object.prototype.hasOwnProperty.call(TABLES, t))
       throw new HttpError(400, "This backup is damaged.");
-    if (!Array.isArray(o.r) || o.r.length !== TABLES[t].length) throw new HttpError(400, "This backup is damaged.");
+    const map = layout[t];
+    if (!Array.isArray(o.r) || o.r.length !== map.width) throw new HttpError(400, "This backup is damaged.");
     for (const v of o.r)
       if (!(v === null || typeof v === "string" || (typeof v === "number" && Number.isSafeInteger(v))))
         throw new HttpError(400, "This backup is damaged.");
-    await fn({ t, r: o.r });
+    // into this version's column order; columns the backup doesn't have get their default
+    await fn({ t, r: map.from.map((i, k) => (i >= 0 ? o.r![i] : map.defaults[k])) as unknown[] });
   };
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const consume = async (chunk: Buffer | null) => {
@@ -789,7 +848,8 @@ export function restoreBackup(id: string): Promise<{ safety: string; missing: nu
         const keep = await all<{ key: string; value: string }>(sql`SELECT key, value FROM settings`);
         await run(
           sql`TRUNCATE users, settings, pages, page_revisions, page_links, search_idx, search_dirty, media, legal_pages,
-                totp_devices, trash, trash_revisions, audit_log, sessions, reset_tokens, rate_limits, lockouts`,
+                totp_devices, trash, trash_revisions, audit_log, sessions, reset_tokens, rate_limits, lockouts,
+                share_links`,
         );
         const batch: Record<string, unknown[][]> = {};
         const parents: [number, number][] = [];
@@ -894,12 +954,13 @@ async function restoreMediaFor(st: BackupStore, m: Manifest, contents: string[],
  *  - the page is gone → it is recreated with its complete history from the backup.
  * Files the page shows that no longer exist are restored as well.
  */
-export function restorePage(id: string, pageId: number, userId: number) {
+export function restorePage(id: string, pageId: number, userId: number, level: Level) {
   return locked("restore-page", async () => {
     const st = await backupStore();
     const m = await loadManifest(st, id);
     const entry = m.pages.find((p) => p.id === pageId);
-    if (!entry) throw new HttpError(404, "This page isn’t in the backup.");
+    // a page that was private beyond this person's level doesn't exist for them, in backups too
+    if (!entry || (entry.access ?? 0) > level) throw new HttpError(404, "This page isn’t in the backup.");
     const work = scratchDir();
     try {
       const f = await fetchData(st, id, work);
@@ -925,6 +986,7 @@ export function restorePage(id: string, pageId: number, userId: number) {
           parentId: cur.parent_id,
           expectedRev: cur.rev,
           userId,
+          level,
           comment: `Backup ${label} UTC`,
         });
         return { mode: "version" as const, slug: u.slug, files };
@@ -944,12 +1006,19 @@ export function restorePage(id: string, pageId: number, userId: number) {
             created_at: Number(p.created_at),
             updated_at: Number(p.updated_at),
             system_key: (p.system_key as string | null) ?? null,
+            // at least as private as it was, also when its chapter is gone now
+            access: Math.max(Number(p.access) || 0, entry.access ?? 0),
             revisions: revisionSource(revs),
           },
           [],
         ),
       );
-      publish({ type: "page.created", slug: res.page.slug, title: res.page.title, rev: res.page.rev });
+      publish({
+        type: "page.created",
+        slug: res.page.slug,
+        rev: res.page.rev,
+        access: await effectiveAccess(res.page.id),
+      });
       return { mode: "recreated" as const, slug: res.page.slug, files };
     } finally {
       rmSync(work, { recursive: true, force: true });

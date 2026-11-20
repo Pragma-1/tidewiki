@@ -393,15 +393,17 @@ describe("password reset by e-mail", () => {
 describe("wiki pages", () => {
   it("creates, versions, detects edit conflicts, searches safely", async () => {
     const p = await createPage({
+      level: 2,
       title: "Süßes Rezept",
       content: "# Kuchen\nmit Schokolade",
       parentId: null,
       userId: adminId,
     });
     expect(p.slug).toBe("susses-rezept");
-    const p2 = await createPage({ title: "Süßes Rezept", content: "x", parentId: p.id, userId: adminId });
+    const p2 = await createPage({ level: 2, title: "Süßes Rezept", content: "x", parentId: p.id, userId: adminId });
     expect(p2.slug).toBe("susses-rezept-2");
     const u = await updatePage(p.slug, {
+      level: 2,
       title: p.title,
       content: "neu Schokolade",
       parentId: null,
@@ -410,26 +412,33 @@ describe("wiki pages", () => {
     });
     expect(u.rev).toBe(2);
     await expect(
-      updatePage(p.slug, { title: "t", content: "stale", parentId: null, expectedRev: 1, userId: adminId }),
+      updatePage(p.slug, { level: 2, title: "t", content: "stale", parentId: null, expectedRev: 1, userId: adminId }),
     ).rejects.toThrow(/Someone else/);
-    expect((await search("schokol")).hits.map((r) => r.slug)).toContain("susses-rezept");
+    expect((await search("schokol", { level: 2 })).hits.map((r) => r.slug)).toContain("susses-rezept");
     for (const evil of ['"', "* OR 1", "a AND NOT b", "title:x", "NEAR(a b)", "'; DROP TABLE pages;--", "\\"])
-      await expect(search(evil)).resolves.toBeDefined();
-    expect((await search("  ")).hits).toEqual([]);
+      await expect(search(evil, { level: 2 })).resolves.toBeDefined();
+    expect((await search("  ", { level: 2 })).hits).toEqual([]);
     expect(await db().prepare("SELECT COUNT(*) n FROM pages").get()).toBeTruthy();
   });
   it("blocks cycles and runaway depth", async () => {
-    const a = await createPage({ title: "A1", content: "", parentId: null, userId: adminId });
-    const b = await createPage({ title: "B1", content: "", parentId: a.id, userId: adminId });
-    const c = await createPage({ title: "C1", content: "", parentId: b.id, userId: adminId });
+    const a = await createPage({ level: 2, title: "A1", content: "", parentId: null, userId: adminId });
+    const b = await createPage({ level: 2, title: "B1", content: "", parentId: a.id, userId: adminId });
+    const c = await createPage({ level: 2, title: "C1", content: "", parentId: b.id, userId: adminId });
     await expect(
       async () =>
-        await updatePage(a.slug, { title: "A1", content: "", parentId: c.id, expectedRev: 1, userId: adminId }),
+        await updatePage(a.slug, {
+          level: 2,
+          title: "A1",
+          content: "",
+          parentId: c.id,
+          expectedRev: 1,
+          userId: adminId,
+        }),
     ).rejects.toThrow(/inside itself/);
-    await expect(createPage({ title: "D1", content: "", parentId: c.id, userId: adminId })).rejects.toThrow(
+    await expect(createPage({ level: 2, title: "D1", content: "", parentId: c.id, userId: adminId })).rejects.toThrow(
       /levels deep/,
     );
-    expect((await getTree()).length).toBeGreaterThan(0);
+    expect((await getTree(2)).length).toBeGreaterThan(0);
     expect(await trashPage(a.slug, adminId)).toBeTruthy();
     expect((await getPage(b.slug))!.parent_id).toBeNull();
   });

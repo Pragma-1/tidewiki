@@ -2,6 +2,7 @@ import { all, one, run, sql, tx, now } from "./db";
 import { LIMITS } from "./config";
 import { HttpError, slugify } from "./validate";
 import { publish } from "./events";
+import { effectiveAccess, hiddenPages, inheritedAccess, visibleId, type Level } from "./access";
 
 /* ------------------------------------------------------------------ links */
 
@@ -32,16 +33,19 @@ export async function rebuildLinks() {
   });
 }
 
-/** Pages that link here. */
-export function backlinks(slug: string) {
+/** Pages that link here (those the reader may see). */
+export async function backlinks(slug: string, level: Level) {
+  const hidden = await hiddenPages(level);
   return all<{ slug: string; title: string }>(
     sql`SELECT p.slug, p.title FROM page_links l JOIN pages p ON p.id = l.from_id
-        WHERE l.to_slug = ${slug} AND p.slug <> ${slug} ORDER BY lower(p.title) LIMIT 100`,
+        WHERE l.to_slug = ${slug} AND p.slug <> ${slug} AND ${visibleId(sql`p.id`, hidden)}
+        ORDER BY lower(p.title) LIMIT 100`,
   );
 }
 
-/** Every saved version across the wiki, newest first (MediaWiki's "recent changes"). */
-export function recentChanges(limit = 50, before?: number) {
+/** Every saved version across the wiki the reader may see, newest first (MediaWiki's "recent changes"). */
+export async function recentChanges(level: Level, limit = 50, before?: number) {
+  const hidden = await hiddenPages(level);
   return all<{
     id: number;
     rev: number;
@@ -58,15 +62,16 @@ export function recentChanges(limit = 50, before?: number) {
           (SELECT length(r2.content) FROM page_revisions r2 WHERE r2.page_id = r.page_id AND r2.rev = r.rev - 1) AS prev_len,
           length(r.content) AS len
         FROM page_revisions r JOIN pages p ON p.id = r.page_id LEFT JOIN users u ON u.id = r.author_id
-        ${before ? sql`WHERE r.id < ${before}` : sql``} ORDER BY r.id DESC LIMIT ${limit}`,
+        WHERE ${visibleId(sql`p.id`, hidden)} ${before ? sql`AND r.id < ${before}` : sql``}
+        ORDER BY r.id DESC LIMIT ${limit}`,
   );
 }
 
 /** Depth-first reading order, for "previous / next" links. */
-export async function readingOrder(): Promise<{ slug: string; title: string }[]> {
+export async function readingOrder(level: Level): Promise<{ slug: string; title: string }[]> {
   const walk = (ns: TreeNode[]): { slug: string; title: string }[] =>
     ns.flatMap((n) => [{ slug: n.slug, title: n.title }, ...walk(n.children)]);
-  return walk(await getTree());
+  return walk(await getTree(level));
 }
 
 export type PageRow = {
@@ -84,8 +89,18 @@ export type PageRow = {
   system_key?: string | null;
   author?: string | null;
   editor?: string | null;
+  /** own access level (0 everyone, 1 administrators, 2 owner); sub-pages inherit it */
+  access: number;
 };
-export type TreeNode = { id: number; slug: string; title: string; parent_id: number | null; children: TreeNode[] };
+export type TreeNode = {
+  id: number;
+  slug: string;
+  title: string;
+  parent_id: number | null;
+  /** own access level; > 0 marks a private page or section in the menu */
+  access: number;
+  children: TreeNode[];
+};
 
 const SELECT = sql`SELECT p.*, cu.username AS author, uu.username AS editor FROM pages p
   LEFT JOIN users cu ON cu.id = p.created_by LEFT JOIN users uu ON uu.id = p.updated_by`;
@@ -93,9 +108,12 @@ const SELECT = sql`SELECT p.*, cu.username AS author, uu.username AS editor FROM
 export const getPage = (slug: string) => one<PageRow>(sql`${SELECT} WHERE p.slug = ${slug}`);
 export const getPageById = (id: number) => one<PageRow>(sql`${SELECT} WHERE p.id = ${id}`);
 
-export async function getTree(): Promise<TreeNode[]> {
+/** The chapter tree as the reader may see it (private pages and their sub-pages left out). */
+export async function getTree(level: Level): Promise<TreeNode[]> {
+  const hidden = await hiddenPages(level);
   const rows = await all<Omit<TreeNode, "children">>(
-    sql`SELECT id, slug, title, parent_id FROM pages ORDER BY position, lower(title)`,
+    sql`SELECT id, slug, title, parent_id, access FROM pages WHERE ${visibleId(sql`id`, hidden)}
+        ORDER BY position, lower(title)`,
   );
   const nodes = new Map<number, TreeNode>(rows.map((r) => [r.id, { ...r, children: [] }]));
   const roots: TreeNode[] = [];
@@ -106,7 +124,17 @@ export async function getTree(): Promise<TreeNode[]> {
   return roots;
 }
 
-export const recentPages = (limit = 8) => all<PageRow>(sql`${SELECT} ORDER BY p.updated_at DESC LIMIT ${limit}`);
+export const recentPages = async (level: Level, limit = 8) =>
+  all<PageRow>(
+    sql`${SELECT} WHERE ${visibleId(sql`p.id`, await hiddenPages(level))} ORDER BY p.updated_at DESC LIMIT ${limit}`,
+  );
+
+/** The page, if the reader may see it; otherwise undefined, exactly like an address that isn't used. */
+export async function getVisiblePage(slug: string, level: Level): Promise<PageRow | undefined> {
+  const p = await getPage(slug);
+  if (!p) return undefined;
+  return (await effectiveAccess(p.id)) <= level ? p : undefined;
+}
 
 const likePrefix = (s: string) => `${s.replace(/[\\%_]/g, (c) => `\\${c}`)}-%`;
 
@@ -138,10 +166,15 @@ export async function depthOf(id: number | null): Promise<number> {
   return r?.d ?? 0;
 }
 
-export async function assertParentOk(pageId: number | null, parentId: number | null) {
+/**
+ * Checks a new chapter for a page. `level`: the person's level — a chapter they may not see
+ * "does not exist" for them (null: internal callers like restores, which check on their own).
+ */
+export async function assertParentOk(pageId: number | null, parentId: number | null, level: Level | null) {
   if (parentId === null) return;
   const parent = await one(sql`SELECT 1 FROM pages WHERE id = ${parentId}`);
-  if (!parent) throw new HttpError(400, "The selected chapter does not exist.", "parentId");
+  if (!parent || (level !== null && (await effectiveAccess(parentId)) > level))
+    throw new HttpError(400, "The selected chapter does not exist.", "parentId");
   if (pageId !== null) {
     // refuse cycles: the new parent must not be the page itself or one of its descendants
     const cyc = await one(
@@ -178,13 +211,15 @@ export type ListedPage = {
   author: string | null;
   updated_at: number;
   rev: number;
+  access: number;
 };
 
-/** Every page with what the page manager shows; tree order (position, then title). */
-export const listPages = () =>
+/** Every page the reader may see, with what the page manager shows; tree order (position, then title). */
+export const listPages = async (level: Level) =>
   all<ListedPage>(
-    sql`SELECT p.id, p.slug, p.title, p.parent_id, p.created_by, u.username AS author, p.updated_at, p.rev
+    sql`SELECT p.id, p.slug, p.title, p.parent_id, p.created_by, u.username AS author, p.updated_at, p.rev, p.access
         FROM pages p LEFT JOIN users u ON u.id = p.created_by
+        WHERE ${visibleId(sql`p.id`, await hiddenPages(level))}
         ORDER BY p.position, lower(p.title), p.id`,
   );
 
@@ -193,12 +228,18 @@ export async function createPage(input: {
   content: string;
   parentId: number | null;
   userId: number;
+  /** the author's level: they can only file pages under chapters they see */
+  level: Level;
+  /** own access level of the new page (never above the author's level); default 0 */
+  access?: Level;
   slug?: string;
   comment?: string | null;
 }): Promise<PageRow> {
   const t = now();
+  const access = Math.min(input.access ?? 0, input.level) as Level;
+  let eff: Level = 0;
   const page = await tx(async () => {
-    await assertParentOk(null, input.parentId);
+    await assertParentOk(null, input.parentId, input.level);
     const slug = await uniqueSlug(slugify(input.slug || input.title));
     const pos =
       (
@@ -208,12 +249,14 @@ export async function createPage(input: {
         )
       )?.n ?? 1;
     const r = await one<{ id: number }>(
-      sql`INSERT INTO pages(slug, title, parent_id, position, content, rev, created_by, updated_by, created_at, updated_at)
+      sql`INSERT INTO pages(slug, title, parent_id, position, content, rev, created_by, updated_by, created_at, updated_at,
+            access)
           VALUES (${slug}, ${input.title}, ${input.parentId}, ${pos}, ${input.content}, 1,
-                  ${input.userId}, ${input.userId}, ${t}, ${t})
+                  ${input.userId}, ${input.userId}, ${t}, ${t}, ${access})
           RETURNING id`,
     );
     const id = r!.id;
+    eff = Math.max(access, await inheritedAccess(input.parentId)) as Level;
     await run(
       sql`INSERT INTO page_revisions(page_id, rev, title, content, author_id, created_at, comment)
           VALUES (${id}, 1, ${input.title}, ${input.content}, ${input.userId}, ${t}, ${input.comment || null})`,
@@ -221,7 +264,7 @@ export async function createPage(input: {
     await saveLinks(id, input.content);
     return (await getPageById(id))!;
   });
-  publish({ type: "page.created", slug: page.slug, title: page.title, rev: page.rev });
+  publish({ type: "page.created", slug: page.slug, rev: page.rev, access: eff });
   return page;
 }
 
@@ -233,20 +276,26 @@ export async function updatePage(
     parentId: number | null;
     expectedRev: number;
     userId: number;
+    /** the editor's level: a page they may not see is "not found", chapters likewise; null = internal */
+    level: Level | null;
     comment?: string | null;
     restoredFrom?: number | null;
   },
 ): Promise<PageRow> {
   const t = now();
+  let eff: Level = 0;
   const page = await tx(async () => {
     const cur = await getPage(slug);
     if (!cur) throw new HttpError(404, "Page not found.");
+    const effBefore = await effectiveAccess(cur.id);
+    if (input.level !== null && effBefore > input.level) throw new HttpError(404, "Page not found.");
     if (cur.rev !== input.expectedRev)
       throw new HttpError(
         409,
         "Someone else saved this page while you were editing. Copy your changes, reload, and merge them.",
       );
-    if (input.parentId !== cur.parent_id) await assertParentOk(cur.id, input.parentId);
+    const moved = input.parentId !== cur.parent_id;
+    if (moved) await assertParentOk(cur.id, input.parentId, input.level);
     const rev = cur.rev + 1;
     await run(
       sql`UPDATE pages SET title = ${input.title}, content = ${input.content}, parent_id = ${input.parentId},
@@ -259,9 +308,18 @@ export async function updatePage(
                   ${input.comment || null}, ${input.restoredFrom ?? null})`,
     );
     await saveLinks(cur.id, input.content);
+    // moving never makes a page more public: it keeps at least the level it had (and so do its
+    // sub-pages); making it more visible is a deliberate change of its visibility
+    let effAfter = moved ? await effectiveAccess(cur.id) : effBefore;
+    if (effAfter < effBefore) {
+      await run(sql`UPDATE pages SET access = ${effBefore} WHERE id = ${cur.id}`);
+      effAfter = effBefore;
+    }
+    // everyone who saw it before or sees it now hears about the change
+    eff = Math.min(effBefore, effAfter) as Level;
     return (await getPageById(cur.id))!;
   });
-  publish({ type: "page.updated", slug: page.slug, title: page.title, rev: page.rev });
+  publish({ type: "page.updated", slug: page.slug, rev: page.rev, access: eff });
   return page;
 }
 
@@ -270,8 +328,12 @@ export async function updatePage(
  * lost, and the restore itself can be undone the same way). Title and text come from the old
  * version; the page stays where it is in the chapter tree.
  */
-export async function restoreRevision(slug: string, rev: number, input: { expectedRev: number; userId: number }) {
-  const cur = await getPage(slug);
+export async function restoreRevision(
+  slug: string,
+  rev: number,
+  input: { expectedRev: number; userId: number; level: Level },
+) {
+  const cur = await getVisiblePage(slug, input.level);
   if (!cur) throw new HttpError(404, "Page not found.");
   const old = await getRevision(cur.id, rev);
   if (!old) throw new HttpError(404, "This version doesn’t exist.");
@@ -283,6 +345,7 @@ export async function restoreRevision(slug: string, rev: number, input: { expect
     parentId: cur.parent_id,
     expectedRev: input.expectedRev,
     userId: input.userId,
+    level: input.level,
     restoredFrom: rev,
   });
 }
@@ -335,7 +398,9 @@ export async function breadcrumbs(page: PageRow): Promise<{ slug: string; title:
   return rows;
 }
 
-export const pageCount = async () => (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM pages`))?.n ?? 0;
+export const pageCount = async (level: Level) =>
+  (await one<{ n: number }>(sql`SELECT COUNT(*) AS n FROM pages WHERE ${visibleId(sql`id`, await hiddenPages(level))}`))
+    ?.n ?? 0;
 
 /** Chapters a page may be filed under (nesting is capped, and a page can't become its own child). */
 export function parentOptions(
@@ -348,4 +413,29 @@ export function parentOptions(
       ? []
       : [{ id: n.id, title: n.title, depth }, ...parentOptions(n.children, excludeId, depth + 1)],
   );
+}
+
+/**
+ * Sets who may see a page (and with it its sub-pages). Everyone who could see it before or can
+ * see it now hears about the change, so open pages refresh (and leave it if it's gone for them).
+ */
+export async function setPageAccess(pageId: number, access: Level, effBefore: Level) {
+  const slug = await tx(async () => {
+    const r = await one<{ slug: string }>(sql`UPDATE pages SET access = ${access} WHERE id = ${pageId} RETURNING slug`);
+    if (!r) throw new HttpError(404, "Page not found.");
+    return r.slug;
+  });
+  const effAfter = await effectiveAccess(pageId);
+  publish({ type: "page.access", slug, access: Math.min(effBefore, effAfter) });
+}
+
+/** How many pages hang below a page, at any depth (capped like the other walks). */
+export async function descendantCount(id: number): Promise<number> {
+  const r = await one<{ n: number }>(
+    sql`WITH RECURSIVE down(id, d) AS (
+          SELECT id, 1 FROM pages WHERE parent_id = ${id}
+          UNION ALL SELECT p.id, down.d + 1 FROM pages p JOIN down ON p.parent_id = down.id WHERE down.d < 21
+        ) SELECT COUNT(*) AS n FROM down`,
+  );
+  return r?.n ?? 0;
 }

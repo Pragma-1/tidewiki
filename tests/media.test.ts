@@ -107,9 +107,9 @@ describe("uploads", () => {
     expect(v.kind).toBe("video");
     expect((await listMedia()).length).toBe(2);
     expect((await listMedia())[0].used_in).toBe(0);
-    await deleteMedia(v.id, { id: uid, role: "admin" });
+    await deleteMedia(v.id, { id: uid, role: "admin", isOwner: true });
     expect((await listMedia()).length).toBe(1);
-    await expect(deleteMedia(m.id, { id: 999, role: "editor" })).rejects.toThrow(/uploader/);
+    await expect(deleteMedia(m.id, { id: 999, role: "editor", isOwner: false })).rejects.toThrow(/uploader/);
   });
   it("enforces the size limit while streaming", async () => {
     const big = Buffer.concat([fx("exif.jpg"), Buffer.alloc(16 * 1024 * 1024)]);

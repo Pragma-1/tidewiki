@@ -79,12 +79,14 @@ describe("deleting for good", () => {
     // the long text goes to TOAST storage (compressed, so make it incompressible around the marker)
     const noise = Array.from({ length: 3000 }, () => Math.random().toString(36).slice(2)).join(" ");
     const p = await createPage({
+      level: 2,
       title: "Wipe Seite",
       content: `${short}\n\n${noise}\n${long}`,
       parentId: null,
       userId: uid,
     });
     await updatePage(p.slug, {
+      level: 2,
       title: p.title,
       content: `zweite Fassung ${short}\n${noise}\n${long}`,
       parentId: null,
@@ -94,8 +96,8 @@ describe("deleting for good", () => {
     expect((await dbFilesContain(short)).length).toBeGreaterThan(0); // the scan does find it
     await trashPage(p.slug, uid);
     expect((await dbFilesContain(short)).length).toBeGreaterThan(0); // in the trash: still there, on purpose
-    const item = (await listTrash()).find((i) => i.slug === p.slug)!;
-    await purgeTrashItem(item.id);
+    const item = (await listTrash(2)).find((i) => i.slug === p.slug)!;
+    await purgeTrashItem(item.id, 2);
     await settled();
     expect(await dbFilesContain(short)).toEqual([]);
     expect(await dbFilesContain(long)).toEqual([]);
@@ -105,10 +107,10 @@ describe("deleting for good", () => {
     const uid = await addUser("wipe-b", "admin");
     const a = marker("EMPTY");
     const b = marker("OLD");
-    const pa = await createPage({ title: "Wipe leer", content: a, parentId: null, userId: uid });
-    const pb = await createPage({ title: "Wipe alt", content: b, parentId: null, userId: uid });
+    const pa = await createPage({ level: 2, title: "Wipe leer", content: a, parentId: null, userId: uid });
+    const pb = await createPage({ level: 2, title: "Wipe alt", content: b, parentId: null, userId: uid });
     await trashPage(pa.slug, uid);
-    await emptyTrash();
+    await emptyTrash(2);
     await settled();
     expect(await dbFilesContain(a)).toEqual([]);
     await trashPage(pb.slug, uid);
@@ -130,7 +132,7 @@ describe("deleting for good", () => {
   it("while an older snapshot could still see the rows, the wipe isn't counted as done", async () => {
     const uid = await addUser("wipe-snap", "admin");
     const m = marker("SNAPSHOT");
-    const pg1 = await createPage({ title: "Wipe Schnappschuss", content: m, parentId: null, userId: uid });
+    const pg1 = await createPage({ level: 2, title: "Wipe Schnappschuss", content: m, parentId: null, userId: uid });
     await settled();
     // a long read elsewhere (like a backup in progress): it started before the deletion
     const reader = await appClient();
@@ -138,7 +140,7 @@ describe("deleting for good", () => {
       await reader.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await reader.query("SELECT 1");
       await trashPage(pg1.slug, uid);
-      await emptyTrash();
+      await emptyTrash(2);
       expect(await pendingWipes()).toEqual(expect.arrayContaining(["pages", "page_revisions"]));
       expect((await dbFilesContain(m)).length).toBeGreaterThan(0); // honestly not gone yet
       await reader.query("COMMIT");
@@ -178,7 +180,7 @@ describe("media: delete several, delete unused, and really gone", () => {
     const b = await upload("b.png", uid);
     expect(existsSync(a.file) && existsSync(b.file)).toBe(true);
     expect((await dbFilesContain(secretName)).length).toBeGreaterThan(0);
-    const gone = await deleteMediaMany([a.id, b.id], { id: uid, role: "admin" });
+    const gone = await deleteMediaMany([a.id, b.id], { id: uid, role: "admin", isOwner: true });
     expect(gone.map((m) => m.id).sort()).toEqual([a.id, b.id].sort());
     expect(existsSync(a.file) || existsSync(b.file)).toBe(false);
     expect((await listMedia()).some((m) => m.id === a.id || m.id === b.id)).toBe(false);
@@ -191,11 +193,13 @@ describe("media: delete several, delete unused, and really gone", () => {
     const other = await addUser("media-other", "editor");
     const mine = await upload("mine.png", other);
     const theirs = await upload("theirs.png", owner);
-    await expect(deleteMediaMany([mine.id, theirs.id], { id: other, role: "editor" })).rejects.toMatchObject({
+    await expect(
+      deleteMediaMany([mine.id, theirs.id], { id: other, role: "editor", isOwner: false }),
+    ).rejects.toMatchObject({
       status: 403,
     });
     expect(existsSync(mine.file) && existsSync(theirs.file)).toBe(true);
-    await deleteMediaMany([mine.id], { id: other, role: "editor" });
+    await deleteMediaMany([mine.id], { id: other, role: "editor", isOwner: false });
     expect(existsSync(mine.file)).toBe(false);
   });
 
@@ -206,8 +210,15 @@ describe("media: delete several, delete unused, and really gone", () => {
     const oldOnly = await upload("old.png", uid);
     const unused = await upload("unused.png", uid);
     // shown on a page; shown on a page that's now in the trash; shown only in an older version
-    await createPage({ title: "Zeigt Bild", content: `![](/media/${shown.name})`, parentId: null, userId: uid });
+    await createPage({
+      level: 2,
+      title: "Zeigt Bild",
+      content: `![](/media/${shown.name})`,
+      parentId: null,
+      userId: uid,
+    });
     const b = await createPage({
+      level: 2,
       title: "Im Papierkorb",
       content: `![](/media/${binned.name})`,
       parentId: null,
@@ -215,12 +226,20 @@ describe("media: delete several, delete unused, and really gone", () => {
     });
     await trashPage(b.slug, uid);
     const h = await createPage({
+      level: 2,
       title: "Hatte Bild",
       content: `![](/media/${oldOnly.name})`,
       parentId: null,
       userId: uid,
     });
-    await updatePage(h.slug, { title: h.title, content: "ohne Bild", parentId: null, expectedRev: h.rev, userId: uid });
+    await updatePage(h.slug, {
+      level: 2,
+      title: h.title,
+      content: "ohne Bild",
+      parentId: null,
+      expectedRev: h.rev,
+      userId: uid,
+    });
     const list = new Map((await listMedia()).map((m) => [m.id, m]));
     expect(list.get(shown.id)).toMatchObject({ used_in: 1, in_trash: 0 });
     expect(list.get(binned.id)).toMatchObject({ used_in: 0, in_trash: 1 });

@@ -1,11 +1,16 @@
 import { api, json } from "@/lib/api";
 import { audit } from "@/lib/audit";
-import { deleteMediaMany, listMedia, mediaUsage, storeUpload } from "@/lib/media";
+import { deleteMediaMany, listMedia, mediaUsage, privateMedia, storeUpload } from "@/lib/media";
+import { levelOf } from "@/lib/access";
 import { consume } from "@/lib/rate-limit";
 import { HttpError } from "@/lib/validate";
 export const dynamic = "force-dynamic";
 
-export const GET = api("admin", async () => json({ files: await listMedia(), ...(await mediaUsage()) }));
+export const GET = api("admin", async ({ user }) => {
+  // files only private pages beyond this person's level show are left out, like those pages
+  const priv = await privateMedia(levelOf(user));
+  return json({ files: (await listMedia()).filter((m) => !priv.has(m.name)), ...(await mediaUsage()) });
+});
 
 // Raw request body = the file. Type is decided by the file's own bytes, never by headers or the name.
 export const POST = api("editor", async ({ req, user, ip }) => {

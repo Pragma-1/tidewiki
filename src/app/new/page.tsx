@@ -2,6 +2,7 @@ import { Shell } from "@/components/shell";
 import { Editor } from "@/components/editor";
 import { gate } from "@/lib/guard";
 import { getTree, parentOptions } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { getLang, getT } from "@/lib/i18n-server";
 import { localTree, localVersions } from "@/lib/system-pages";
 export const dynamic = "force-dynamic";
@@ -14,10 +15,10 @@ export default async function NewPage({
 }: {
   searchParams: Promise<{ parent?: string; import?: string }>;
 }) {
-  await gate("edit");
+  const level = levelOf(await gate("edit"));
   const sp = await searchParams;
   const p = sp.parent;
-  const parents = parentOptions(localTree(await getTree(), await localVersions(await getLang())));
+  const parents = parentOptions(localTree(await getTree(level), await localVersions(await getLang())));
   const parentId = p && /^\d{1,9}$/.test(p) && parents.some((x) => x.id === Number(p)) ? Number(p) : null;
   return (
     <Shell live={false}>

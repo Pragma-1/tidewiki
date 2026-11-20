@@ -1,3 +1,4 @@
+import { effectiveAccess } from "./access";
 import { all, one, run, sql, tx, now } from "./db";
 import { publish } from "./events";
 import type { Lang } from "./i18n";
@@ -379,7 +380,7 @@ export async function syncSystemPages(lang: Lang): Promise<number> {
       return true;
     });
     if (!done) continue;
-    publish({ type: "page.updated", slug: r.slug, title: target.title, rev: r.rev + 1 });
+    publish({ type: "page.updated", slug: r.slug, rev: r.rev + 1, access: await effectiveAccess(r.id) });
     changed++;
   }
   return changed;

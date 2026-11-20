@@ -8,7 +8,9 @@ const config: NextConfig = {
   // is switched off and kept out of the build instead of sitting there as attack surface.
   images: { unoptimized: true },
   outputFileTracingExcludes: { "*": ["node_modules/sharp/**", "node_modules/@img/**"] },
-  serverExternalPackages: ["better-sqlite3", "@node-rs/argon2"],
+  // pdfmake/pdfkit/fontkit read their own data files at run time (and pdfmake runs in a worker
+  // thread that requires it from node_modules): kept as packages, not bundled
+  serverExternalPackages: ["better-sqlite3", "@node-rs/argon2", "pdfmake", "pdfkit", "fontkit"],
   async headers() {
     return [
       { source: "/_next/static/:path*", headers: [{ key: "X-Content-Type-Options", value: "nosniff" }] },

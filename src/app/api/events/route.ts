@@ -2,6 +2,7 @@ import { api } from "@/lib/api";
 import { addClient, clientCount, removeClient, subscribe } from "@/lib/events";
 import { LIMITS } from "@/lib/config";
 import { HttpError } from "@/lib/validate";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 
 // Server-Sent Events: pushes "page created/updated/deleted" so open pages refresh live.
@@ -9,7 +10,8 @@ const perIp = new Map<string, number>();
 
 export const GET = api(
   "public",
-  async ({ req, ip }) => {
+  async ({ req, ip, user }) => {
+    const level = levelOf(user);
     if (clientCount() >= LIMITS.maxSseClients) throw new HttpError(503, "Too many live connections.");
     if (ip && (perIp.get(ip) ?? 0) >= 12) throw new HttpError(429, "Too many live connections.");
     if (ip) perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
@@ -25,13 +27,22 @@ export const GET = api(
             cleanup();
           }
         };
-        const off = subscribe((e) => send(`event: wiki\ndata: ${JSON.stringify(e)}\n\n`));
+        // only what this reader may see; the level is fixed for the connection, so a connection
+        // ends after a while and the browser reconnects with the current level (role changes)
+        const off = subscribe((e) => {
+          if (e.access <= level)
+            send(
+              `event: wiki\ndata: ${JSON.stringify({ type: e.type, slug: e.slug, rev: "rev" in e ? e.rev : undefined })}\n\n`,
+            );
+        });
         const beat = setInterval(() => send(": keep-alive\n\n"), 25_000);
+        const life = setTimeout(() => cleanup(), 10 * 60_000);
         let done = false;
         cleanup = () => {
           if (done) return;
           done = true;
           clearInterval(beat);
+          clearTimeout(life);
           off();
           removeClient();
           if (ip) {

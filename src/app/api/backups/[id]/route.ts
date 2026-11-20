@@ -3,11 +3,15 @@ import { audit } from "@/lib/audit";
 import { all, sql } from "@/lib/db";
 import { deleteBackup, getManifest } from "@/lib/backup";
 import { assertOwner, backupId } from "@/lib/backup-auth";
+import { levelOf } from "@/lib/access";
 export const dynamic = "force-dynamic";
 
 /** What's inside one backup: its pages and accounts, each marked whether it exists right now. */
-export const GET = api<{ id: string }>("admin", async ({ params }) => {
+export const GET = api<{ id: string }>("admin", async ({ params, user }) => {
   const m = await getManifest(backupId(params.id));
+  // pages that were private beyond this person's level aren't listed (only the owner sees owner-only pages)
+  const level = levelOf(user);
+  m.pages = m.pages.filter((p) => (p.access ?? 0) <= level);
   const livePages = new Set(
     (await all<{ id: number }>(sql`SELECT id FROM pages WHERE id = ANY(${m.pages.map((p) => p.id)}::bigint[])`)).map(
       (r) => r.id,

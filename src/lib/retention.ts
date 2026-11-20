@@ -4,11 +4,12 @@ import { purgeLockouts } from "./lockout";
 import { purgeRateLimits } from "./rate-limit";
 import { purgeOldTrash } from "./trash";
 import { sweepMediaDir } from "./media";
+import { purgeExpiredShares } from "./shares";
 
 /**
  * Storage limitation (Art. 5(1)(e) GDPR): IP addresses in the security log are removed after
  * `ip_retention_days`, whole entries after `log_retention_days`; expired sessions, reset links,
- * counters and lock-outs are dropped, and pages that have been in the trash for 30 days are deleted
+ * counters, lock-outs and expired shared links are dropped, and pages that have been in the trash for 30 days are deleted
  * for good. Runs at start-up and then hourly.
  */
 export async function purgeExpired() {
@@ -22,6 +23,7 @@ export async function purgeExpired() {
     sessions: await run(sql`DELETE FROM sessions WHERE expires_at <= ${t}`),
     resets: await run(sql`DELETE FROM reset_tokens WHERE expires_at <= ${t}`),
     trash: await purgeOldTrash(),
+    shares: await purgeExpiredShares(),
   };
   // Old IPs also live on in the session table (shown to the user as "active sessions").
   const sessionIps = await run(

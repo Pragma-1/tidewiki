@@ -1,5 +1,6 @@
 import { api, json } from "@/lib/api";
-import { getPage, restoreRevision } from "@/lib/pages";
+import { getVisiblePage, restoreRevision } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { HttpError, int, SLUG_RE } from "@/lib/validate";
 import { audit } from "@/lib/audit";
 import { consume } from "@/lib/rate-limit";
@@ -12,8 +13,13 @@ export const POST = api<{ slug: string }>("editor", async ({ body, user, params,
   const b = await body(1024);
   const rev = int(b.rev, "Version");
   if (rev < 1) throw new HttpError(404, "This version doesn’t exist.");
-  if (!(await getPage(params.slug))) throw new HttpError(404, "Page not found.");
-  const p = await restoreRevision(params.slug, rev, { expectedRev: int(b.expectedRev, "Revision"), userId: user!.id });
+  const level = levelOf(user);
+  if (!(await getVisiblePage(params.slug, level))) throw new HttpError(404, "Page not found.");
+  const p = await restoreRevision(params.slug, rev, {
+    expectedRev: int(b.expectedRev, "Revision"),
+    userId: user!.id,
+    level,
+  });
   await audit("page.version_restored", user!.id, ip, `${p.slug} v${rev} → v${p.rev}`);
   return json({ slug: p.slug, rev: p.rev });
 });

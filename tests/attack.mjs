@@ -210,6 +210,12 @@ async function run() {
     ["POST", "/api/import/apply", 401],
     ["DELETE", "/api/media", 401],
     ["POST", "/api/media/unused", 401],
+    ["PUT", "/api/pages/welcome/access", 401],
+    ["GET", "/api/pages/welcome/shares", 401],
+    ["POST", "/api/pages/welcome/shares", 401],
+    ["GET", "/api/shares", 401],
+    ["DELETE", "/api/shares", 401],
+    ["DELETE", "/api/shares/1", 401],
   ]) {
     const r = await anon.req(m, p, { body: m === "GET" ? undefined : {} });
     ok(r.status === want, `${m} ${p} -> ${r.status} (want ${want})`);
@@ -244,6 +250,35 @@ async function run() {
     ok(!served, `${p} not served (status ${r.status})`);
     ok(!leaked, `${p} leaks no file content`);
   }
+
+  // ---- shared links: guessing, malformed tokens, path tricks ----
+  // Every failure must look the same (404), never a 5xx, never page content.
+  console.log("• shared links can't be guessed or bent");
+  const tok = () =>
+    Array.from({ length: 43 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[rnd(64)]).join(
+      "",
+    );
+  for (const p of [
+    `/s/${tok()}`,
+    `/s/${tok()}/welcome`,
+    `/s/${tok()}/..%2f..%2fsettings`,
+    `/s/${"A".repeat(43)}`,
+    `/s/${"A".repeat(44)}`,
+    "/s/%00",
+    "/s/..%2f..%2fetc%2fpasswd",
+    `/s/media/${tok()}/AAAAAAAAAAAAAAAAAAAAAA.png`,
+    `/s/media/${tok()}/..%2f..%2fwiki.db`,
+    `/s/media/${tok()}/master.key`,
+    `/s/pdf/${tok()}/welcome`,
+    `/s/pdf/${tok()}/..%2f..%2fetc%2fpasswd`,
+  ]) {
+    const r = await anon.req("GET", p);
+    const body = await r.text().catch(() => "");
+    ok(r.status === 404 || r.status === 400 || r.status === 429, `${p.slice(0, 60)} -> ${r.status} (not found)`);
+    ok(!/root:.*:0:0:|-----BEGIN |SQLite format 3|%PDF-/.test(body), `${p.slice(0, 60)} leaks nothing`);
+  }
+  const ap = await anon.req("GET", "/api/pages/..%2f..%2fetc/pdf");
+  ok(ap.status !== 200, `PDF with path tricks refused (${ap.status})`);
 
   // ---- hostile search ----
   console.log("• hostile search input");
@@ -291,6 +326,9 @@ async function run() {
     ["POST", "/api/media/unused"],
     ["POST", "/api/backups/..%2F..%2Fwiki/restore"],
     ["GET", "/api/backups/%2e%2e%2fpool/download"],
+    ["PUT", "/api/pages/welcome/access"],
+    ["POST", "/api/pages/welcome/shares"],
+    ["DELETE", "/api/shares/abc"],
   ];
   let fuzzN = 0;
   for (const [m, p] of ENDPOINTS) {
@@ -406,7 +444,13 @@ async function run() {
         ["POST", "/api/backups/00000000-000000-000000/restore"],
         // without a valid preview token nothing is imported
         ["POST", "/api/import/apply"],
-        ...(isAdmin ? [["POST", "/api/settings/mail-test"]] : []),
+        ["GET", "/api/pages/welcome/pdf"],
+        ...(isAdmin
+          ? [
+              ["POST", "/api/settings/mail-test"],
+              ["GET", "/api/shares"],
+            ]
+          : []),
       ];
       for (const [m, p] of SAFE) {
         for (let i = 0; i < 8; i++) {
@@ -437,6 +481,45 @@ async function run() {
           }
         }
         ok(fives === before2, `no 5xx from authenticated write fuzzing (saw ${fives - before2})`);
+
+        // a shared link's whole life, on a junk page: made, opened without an account, revoked, dead
+        console.log("• shared link lifecycle (junk page)");
+        const junk = await me.req("POST", "/api/pages", {
+          body: { title: `attack-share-${Date.now()}`, content: "ATTACK-SHARE-MARKER", parentId: null },
+        });
+        const jslug = (await junk.json().catch(() => ({}))).slug;
+        if (jslug) {
+          for (let i = 0; i < 8; i++) {
+            const raw = JSON.stringify(
+              Object.fromEntries(
+                Array.from({ length: rnd(4) }, () => [KEYS[rnd(KEYS.length)], JUNK[rnd(JUNK.length)]]),
+              ),
+            );
+            await me.req("PUT", `/api/pages/${jslug}/access`, { body: raw }).catch(() => {});
+            await me.req("POST", `/api/pages/${jslug}/shares`, { body: raw }).catch(() => {});
+          }
+          const mk = await me.req("POST", `/api/pages/${jslug}/shares`, { body: { section: false, days: 1 } });
+          const url = (await mk.json().catch(() => ({}))).url ?? "";
+          const t = url.split("/s/")[1] ?? "";
+          ok(mk.status === 201 && /^[A-Za-z0-9_-]{43}$/.test(t), `link made (${mk.status})`);
+          const view = await anon.req("GET", `/s/${t}`);
+          ok(
+            view.status === 200 && (await view.text()).includes("ATTACK-SHARE-MARKER"),
+            "link opens without an account",
+          );
+          const pdf = await anon.req("GET", `/s/pdf/${t}/${jslug}`);
+          ok(
+            pdf.status === 200 && (pdf.headers.get("content-type") || "").startsWith("application/pdf"),
+            "…and as PDF",
+          );
+          const listed = await (await me.req("GET", `/api/pages/${jslug}/shares`)).json().catch(() => ({}));
+          const id = listed.links?.[0]?.id;
+          ok(!!id && !JSON.stringify(listed).includes(t), "the list never shows the token again");
+          const rv = await me.req("DELETE", `/api/shares/${id}`);
+          ok(rv.status === 200 && (await anon.req("GET", `/s/${t}`)).status === 404, "revoked: dead at once");
+          await me.req("DELETE", "/api/pages", { body: { slugs: [jslug] } }).catch(() => {});
+        }
+        ok(fives === before2, `no 5xx in the shared link checks (saw ${fives - before2})`);
       }
 
       await me.req("POST", "/api/auth/logout", { body: {} }).catch(() => {});

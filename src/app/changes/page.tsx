@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Shell } from "@/components/shell";
 import { gate } from "@/lib/guard";
 import { recentChanges } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
 export const dynamic = "force-dynamic";
@@ -10,12 +11,12 @@ export async function generateMetadata() {
 }
 
 export default async function Changes({ searchParams }: { searchParams: Promise<{ before?: string }> }) {
-  await gate("user"); // only for signed-in people
+  const user = await gate("user"); // only for signed-in people
   const b = (await searchParams).before;
   const before = b && /^\d{1,12}$/.test(b) ? Number(b) : undefined;
   const lang = await getLang();
   const t = makeT(lang);
-  const rows = await recentChanges(50, before);
+  const rows = await recentChanges(levelOf(user), 50, before);
   return (
     <Shell wide>
       <h1 style={{ marginTop: 0 }}>{t("Recent changes")}</h1>

@@ -61,10 +61,10 @@ describe("moving a Tidewiki 1.x wiki (SQLite) into PostgreSQL", () => {
     expect(s.site_name).toBe("Altes Wiki");
     expect(await auth.listDevices(id)).toHaveLength(1);
     expect((await getPage("kind"))!.parent_id).toBe(9);
-    expect((await getTree()).map((n) => n.slug)).toEqual(["eltern"]);
+    expect((await getTree(2)).map((n) => n.slug)).toEqual(["eltern"]);
     expect((await getPage("eltern"))!.content).toBe("Siehe [[Kind]] und Rest"); // NUL can't live in PostgreSQL text
-    expect((await backlinks("kind")).map((b) => b.slug)).toEqual(["eltern"]); // link index rebuilt
-    expect(await listTrash()).toEqual([]);
+    expect((await backlinks("kind", 2)).map((b) => b.slug)).toEqual(["eltern"]); // link index rebuilt
+    expect(await listTrash(2)).toEqual([]);
     // the moved authenticator still signs in (same account id → same encryption context)
     const login = await auth.attemptLogin("alt", "tidal-marsh-lantern-47", null, null);
     expect(login.status).toBe("mfa");
@@ -72,9 +72,9 @@ describe("moving a Tidewiki 1.x wiki (SQLite) into PostgreSQL", () => {
     const code = hotp(base32Decode(secret), Math.floor(Date.now() / 30000));
     expect((await auth.completeMfa(login.token, code, null, null)).status).toBe("ok");
     // pages are searchable by substring right away
-    expect((await search("itte")).hits.map((h) => h.slug)).toEqual(["kind"]);
+    expect((await search("itte", { level: 2 })).hits.map((h) => h.slug)).toEqual(["kind"]);
     // ids continue after the imported ones
-    const fresh = await createPage({ title: "Neu", content: "", parentId: null, userId: id });
+    const fresh = await createPage({ level: 2, title: "Neu", content: "", parentId: null, userId: id });
     expect(fresh.id).toBeGreaterThan(9);
   });
 

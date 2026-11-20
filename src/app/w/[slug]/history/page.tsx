@@ -5,7 +5,8 @@ import { Download, Eye, GitCompare, RotateCcw } from "lucide-react";
 import { Shell } from "@/components/shell";
 import { RestoreVersionButton } from "@/components/page-actions";
 import { gate } from "@/lib/guard";
-import { getPage, getRevision, listRevisions, revisionCount, type RevisionRow } from "@/lib/pages";
+import { getRevision, getVisiblePage, listRevisions, revisionCount, type RevisionRow } from "@/lib/pages";
+import { levelOf } from "@/lib/access";
 import { renderMarkdown } from "@/lib/markdown";
 import { localTitle, localVersions } from "@/lib/system-pages";
 import { getLang, getT } from "@/lib/i18n-server";
@@ -92,8 +93,8 @@ export default async function History({
   const { slug } = await params;
   const sp = await searchParams;
   const user = await gate("user"); // version history only for signed-in people
-  if (!SLUG_RE.test(slug)) notFound();
-  const page = await getPage(slug);
+  if (!SLUG_RE.test(slug) || slug.length > 80) notFound();
+  const page = await getVisiblePage(slug, levelOf(user));
   if (!page) notFound();
   const before = revParam(sp.before);
   const revs = await listRevisions(page.id, before);

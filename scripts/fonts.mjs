@@ -35,3 +35,27 @@ for (const [id, { pkg, css }] of Object.entries(fonts)) {
   writeFileSync(path.join(out, `${id}.css`), sheet);
 }
 console.log(`fonts: ${Object.keys(fonts).length} fonts, ${files} files → public/fonts`);
+
+// Fonts for PDF export (server side only, so not under public/): complete TrueType files —
+// the web fonts above are split into language subsets, a PDF needs one file with every glyph.
+const pdfOut = path.join(root, "pdf-fonts");
+rmSync(pdfOut, { recursive: true, force: true });
+mkdirSync(pdfOut, { recursive: true });
+const PDF_FONTS = {
+  "@expo-google-fonts/inter": {
+    "Inter-Regular.ttf": "400Regular/Inter_400Regular.ttf",
+    "Inter-Italic.ttf": "400Regular_Italic/Inter_400Regular_Italic.ttf",
+    "Inter-SemiBold.ttf": "600SemiBold/Inter_600SemiBold.ttf",
+    "Inter-SemiBoldItalic.ttf": "600SemiBold_Italic/Inter_600SemiBold_Italic.ttf",
+  },
+  "@expo-google-fonts/jetbrains-mono": {
+    "JetBrainsMono-Regular.ttf": "400Regular/JetBrainsMono_400Regular.ttf",
+    "JetBrainsMono-Bold.ttf": "700Bold/JetBrainsMono_700Bold.ttf",
+  },
+};
+for (const [pkg, files] of Object.entries(PDF_FONTS)) {
+  const dir = path.dirname(require.resolve(`${pkg}/package.json`));
+  for (const [to, from] of Object.entries(files)) copyFileSync(path.join(dir, from), path.join(pdfOut, to));
+  copyFileSync(path.join(dir, "LICENSE_FONT"), path.join(pdfOut, `LICENSE-${pkg.split("/")[1]}.txt`));
+}
+console.log(`fonts: PDF fonts → pdf-fonts`);

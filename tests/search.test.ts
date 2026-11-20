@@ -7,11 +7,11 @@ import { fold, globMatch, markdownToPlain, parseQuery, search, type Segment } fr
 
 const join = (segs: Segment[]) => segs.map((s) => s.t).join("");
 const hits = (segs: Segment[]) => segs.filter((s) => s.hit).map((s) => s.t);
-const slugs = async (q: string) => (await search(q, { limit: 100 })).hits.map((h) => h.slug).sort();
+const slugs = async (q: string) => (await search(q, { level: 2, limit: 100 })).hits.map((h) => h.slug).sort();
 
 describe("search", () => {
   let uid = 0;
-  const mk = (title: string, content: string) => createPage({ title, content, parentId: null, userId: uid });
+  const mk = (title: string, content: string) => createPage({ level: 2, title, content, parentId: null, userId: uid });
   beforeAll(async () => {
     uid = await addUser("s");
     await mk("Bitte lesen", "Hier stehen wichtige Inhalte. Der Text ist kurz.");
@@ -67,11 +67,11 @@ describe("search", () => {
   });
 
   it("highlights hits as segments that reproduce the original text exactly", async () => {
-    const r = (await search("straße")).hits[0];
+    const r = (await search("straße", { level: 2 })).hits[0];
     expect(join(r.title)).toBe("Straßenbau");
     expect(hits(r.title)).toEqual(["Straße"]);
     expect(hits(r.snippet)).toEqual(["Straße"]);
-    const w = (await search("wiki*")).hits[0];
+    const w = (await search("wiki*", { level: 2 })).hits[0];
     expect(hits(w.snippet)).toEqual(["Wiki-Pflege", "Wikipedia"]);
   });
 
@@ -79,6 +79,7 @@ describe("search", () => {
     const p = await mk("Flüchtig", "Einmaliger Begriff Quokka");
     expect(await slugs("quokka")).toEqual([p.slug]);
     await updatePage(p.slug, {
+      level: 2,
       title: "Flüchtig",
       content: "jetzt Wombat",
       parentId: null,
@@ -117,7 +118,7 @@ describe("search", () => {
       "*".repeat(300),
       "a*".repeat(100),
     ]) {
-      await expect(search(q)).resolves.toBeDefined();
+      await expect(search(q, { level: 2 })).resolves.toBeDefined();
     }
     expect(await slugs("%")).toEqual([]);
     expect(await slugs("_")).toEqual([]);
@@ -136,7 +137,7 @@ describe("search", () => {
     expect(performance.now() - t0).toBeLessThan(50);
     const big = await mk("Gross", ("lorem ipsum dolor " + "a".repeat(200) + " ").repeat(1500));
     const t1 = performance.now();
-    await search("*a*a*a*a*a*a*c*", { budgetMs: 200 });
+    await search("*a*a*a*a*a*a*c*", { level: 2, budgetMs: 200 });
     expect(performance.now() - t1).toBeLessThan(1500);
     await trashPage(big.slug, uid);
   });

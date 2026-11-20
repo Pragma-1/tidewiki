@@ -1,3 +1,4 @@
+import { hiddenPages, type Level } from "./access";
 import { all, one, run, sql, tx, wipe, now, pgCode } from "./db";
 import { audit, exportAudit } from "./audit";
 import { checkPasswordStrength, hashPassword } from "./password";
@@ -252,8 +253,13 @@ export async function eraseOwnAccount(user: SessionUser, password: string) {
   await eraseUser(user.id, "self");
 }
 
-/** Art. 15 / 20: everything stored about one person, as plain JSON (no hashes, no secrets). */
-export async function exportUserData(userId: number) {
+/**
+ * Art. 15 / 20: everything stored about one person, as plain JSON (no hashes, no secrets).
+ * `level`: of whoever downloads it. Their own contributions are always in it — with the titles
+ * they wrote; private pages beyond that level are listed without their address.
+ */
+export async function exportUserData(userId: number, level: Level) {
+  const hidden = [...(await hiddenPages(level))];
   const u = await userById(userId);
   if (!u) throw new HttpError(404, "User not found.");
   const iso = (t: number | null) => (t ? new Date(t * 1000).toISOString() : null);
@@ -294,25 +300,38 @@ export async function exportUserData(userId: number) {
       detail: a.detail,
     })),
     pages_created: await all(
-      sql`SELECT slug, title, created_at FROM pages WHERE created_by = ${u.id} ORDER BY created_at`,
+      sql`SELECT CASE WHEN p.id = ANY(${hidden}::bigint[]) THEN NULL ELSE p.slug END AS slug,
+            COALESCE((SELECT r.title FROM page_revisions r WHERE r.page_id = p.id AND r.author_id = ${u.id}
+                      ORDER BY r.rev LIMIT 1), p.title) AS title,
+            p.created_at
+          FROM pages p WHERE p.created_by = ${u.id} ORDER BY p.created_at`,
     ),
     files_uploaded: await all(
       sql`SELECT name, original_name, mime, size, created_at FROM media WHERE created_by = ${u.id} ORDER BY created_at`,
     ),
     page_versions_written: await all(
-      sql`SELECT p.slug, p.title, r.rev, r.created_at FROM page_revisions r JOIN pages p ON p.id = r.page_id
+      sql`SELECT CASE WHEN p.id = ANY(${hidden}::bigint[]) THEN NULL ELSE p.slug END AS slug, r.title, r.rev,
+            r.created_at
+          FROM page_revisions r JOIN pages p ON p.id = r.page_id
           WHERE r.author_id = ${u.id} ORDER BY r.created_at`,
     ),
     // deleted pages waiting in the trash (removed for good after 30 days)
     trash: {
       pages_created: await all(
-        sql`SELECT slug, title, created_at, deleted_at FROM trash WHERE created_by = ${u.id} ORDER BY deleted_at`,
+        sql`SELECT CASE WHEN t.access > ${level} THEN NULL ELSE t.slug END AS slug,
+              COALESCE((SELECT r.title FROM trash_revisions r WHERE r.trash_id = t.id AND r.author_id = ${u.id}
+                        ORDER BY r.rev LIMIT 1), t.title) AS title,
+              t.created_at, t.deleted_at
+            FROM trash t WHERE t.created_by = ${u.id} ORDER BY t.deleted_at`,
       ),
       pages_deleted: await all(
-        sql`SELECT slug, title, deleted_at FROM trash WHERE deleted_by = ${u.id} ORDER BY deleted_at`,
+        sql`SELECT CASE WHEN t.access > ${level} THEN NULL ELSE t.slug END AS slug,
+              CASE WHEN t.access > ${level} THEN NULL ELSE t.title END AS title, t.deleted_at
+            FROM trash t WHERE t.deleted_by = ${u.id} ORDER BY t.deleted_at`,
       ),
       page_versions_written: await all(
-        sql`SELECT t.slug, t.title, r.rev, r.created_at FROM trash_revisions r JOIN trash t ON t.id = r.trash_id
+        sql`SELECT CASE WHEN t.access > ${level} THEN NULL ELSE t.slug END AS slug, r.title, r.rev, r.created_at
+            FROM trash_revisions r JOIN trash t ON t.id = r.trash_id
             WHERE r.author_id = ${u.id} ORDER BY r.created_at`,
       ),
     },

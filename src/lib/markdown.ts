@@ -405,6 +405,12 @@ let cacheBytes = 0;
 
 export type RenderOptions = { lang?: Lang; autoloadExternal?: boolean; privacyHref?: string | null };
 
+/** The parsed token stream (same parser, plugins and limits as for HTML) — for the PDF export. */
+export function parseMarkdown(src: string, lang: Lang): Token[] {
+  return md.parse(src, { lang, autoloadExternal: false, privacyHref: null } satisfies Env);
+}
+export type { Token };
+
 export function renderMarkdown(src: string, opts: RenderOptions = {}): { html: string; toc: TocItem[] } {
   const env: Env = {
     lang: opts.lang ?? "en",

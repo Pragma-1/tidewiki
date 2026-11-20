@@ -40,7 +40,8 @@ export async function importSqliteIfPresent(): Promise<null | Record<Table, numb
         const cols = TABLES[t] as readonly string[];
         const have = new Set((lite.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name));
         if (!have.size) continue;
-        const select = cols.map((c) => (have.has(c) ? `"${c}"` : "NULL")).join(", ");
+        // columns Tidewiki 1.x didn't have: private pages came later, every page was visible to all
+        const select = cols.map((c) => (have.has(c) ? `"${c}"` : c === "access" ? "0" : "NULL")).join(", ");
         let batch: unknown[][] = [];
         for (const row of lite.prepare(`SELECT ${select} FROM "${t}"`).raw().iterate() as Iterable<unknown[]>) {
           const r = row.map(clean);
