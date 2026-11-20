@@ -276,15 +276,24 @@ The search box at the top shows matches while you type; **Enter** opens the resu
 
 Case and accents don't matter: \`fur\` also finds "für", \`strasse\` also "Straße".
 `;
-const GUIDE_DE = GUIDE_DE_V1.replace(
+const GUIDE_DE_V3 = GUIDE_DE_V1.replace(
   "Alles hier wird aus reinem Text erzeugt. Öffnen Sie diese Seite im Editor, um zu sehen, wie sie geschrieben ist.",
   "Alles hier wird aus reinem Text erzeugt. Öffnen Sie diese Seite im Editor (**Bearbeiten**), um zu sehen, wie sie geschrieben ist — die Vorschau neben dem Text zeigt jede Änderung sofort.",
 )
   .replace("\n## Listen\n", `${LINKS_DE}\n## Listen\n`)
   .replace("\n## Mehr\n", `${MEDIA_DE_V3}${WORKFLOW_DE}\n## Mehr\n`);
-const GUIDE_EN = GUIDE_EN_V1.replace("\n## Lists\n", `${LINKS_EN}\n## Lists\n`).replace(
+const GUIDE_EN_V3 = GUIDE_EN_V1.replace("\n## Lists\n", `${LINKS_EN}\n## Lists\n`).replace(
   "\n## More\n",
   `${MEDIA_EN_V3}${WORKFLOW_EN}\n## More\n`,
+);
+// v4: the mini player can be moved and resized
+const GUIDE_DE = GUIDE_DE_V3.replace(
+  "Jedes Video lässt sich mit **Bild-in-Bild** unter dem Player aus der Seite lösen: Es läuft dann in einem kleinen Fenster weiter, während Sie weiterlesen und scrollen. Ein zweiter Klick (oder Esc) holt es zurück. Hochgeladene Videos nutzen das Bild-in-Bild des Browsers, YouTube und Vimeo einen Mini-Player in der Ecke. Der Link „Auf YouTube öffnen“ und Linkkarten öffnen sich in einem neuen Tab.",
+  "Jedes Video lässt sich mit **Bild-in-Bild** unter dem Player aus der Seite lösen: Es läuft dann in einem Mini-Player weiter, während Sie weiterlesen und scrollen. Verschieben lässt er sich an der Leiste oben, die Größe ändert die Ecke oben links (beides auch mit den Pfeiltasten); Lage und Größe merkt sich der Browser. Ein zweiter Klick (oder Esc) holt das Video zurück. Hochgeladene Videos bieten außerdem das Bild-in-Bild des Browsers in ihren Steuerelementen. Der Link „Auf YouTube öffnen“ und Linkkarten öffnen sich in einem neuen Tab.",
+);
+const GUIDE_EN = GUIDE_EN_V3.replace(
+  'Every video can be detached from the page with **Picture-in-picture** below the player: it keeps playing in a small window while you read on and scroll. A second click (or Esc) brings it back. Uploaded videos use the browser\'s own picture-in-picture, YouTube and Vimeo a mini player in the corner. "Open on YouTube" and link cards open in a new tab.',
+  'Every video can be detached from the page with **Picture-in-picture** below the player: it keeps playing in a mini player while you read on and scroll. Drag the bar at its top to move it and the top-left corner to resize it (both also work with the arrow keys); the browser remembers where and how big. A second click (or Esc) brings the video back. Uploaded videos also offer the browser\'s own picture-in-picture in their controls. "Open on YouTube" and link cards open in a new tab.',
 );
 
 /** Built-in pages in every language. Keys are stable; slugs never change so links keep working. */
@@ -312,6 +321,8 @@ export const SYSTEM_PAGES: Record<
       { title: "Markdown-Anleitung", content: GUIDE_DE_V1 },
       { title: "Markdown guide", content: GUIDE_EN_V2 },
       { title: "Markdown-Anleitung", content: GUIDE_DE_V2 },
+      { title: "Markdown guide", content: GUIDE_EN_V3 },
+      { title: "Markdown-Anleitung", content: GUIDE_DE_V3 },
     ],
   },
 };

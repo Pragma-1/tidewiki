@@ -10,7 +10,19 @@ const config: NextConfig = {
   outputFileTracingExcludes: { "*": ["node_modules/sharp/**", "node_modules/@img/**"] },
   serverExternalPackages: ["better-sqlite3", "@node-rs/argon2"],
   async headers() {
-    return [{ source: "/_next/static/:path*", headers: [{ key: "X-Content-Type-Options", value: "nosniff" }] }];
+    return [
+      { source: "/_next/static/:path*", headers: [{ key: "X-Content-Type-Options", value: "nosniff" }] },
+      // Font files carry their version in the address: cache them for good.
+      {
+        source: "/fonts/:font/:file",
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+      // The small per-font stylesheets: a day, then checked again.
+      {
+        source: "/fonts/:sheet",
+        headers: [{ key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" }],
+      },
+    ];
   },
   experimental: { serverActions: { bodySizeLimit: "100kb" } },
 };

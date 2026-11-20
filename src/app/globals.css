@@ -216,6 +216,9 @@ mark ::selection {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  /* page width (Darstellung): the band stays full width, its contents line up with the frame */
+  max-width: var(--page-max, none);
+  margin-inline: auto;
 }
 .brand {
   display: inline-flex;
@@ -315,10 +318,12 @@ mark ::selection {
 
 /* ---------- frame: rail + offset sheet; fills wide screens instead of floating in the middle ---------- */
 .frame {
+  /* page width (Darstellung): "full" fills the screen */
+  max-width: var(--page-max, none);
   display: grid;
   grid-template-columns: clamp(15rem, 14vw, 22rem) minmax(0, 1fr);
   gap: 0 clamp(1.25rem, 1.6vw, 2.25rem);
-  margin: -2.5rem 0 0;
+  margin: -2.5rem auto 0;
   padding: 0 clamp(1rem, 3vw, 2.5rem) 1.5rem;
   position: relative;
 }
@@ -2218,6 +2223,9 @@ dialog.confirm-dlg[open] .confirm-box {
 }
 .md .embed.embed-active {
   display: block;
+  /* the placeholder centres its content; the player and its buttons span the width (browsers that
+     align blocks would otherwise shrink and centre them) */
+  place-items: normal;
   aspect-ratio: auto;
   background: transparent;
   border: 0;
@@ -2242,11 +2250,13 @@ dialog.confirm-dlg[open] .confirm-box {
 .md .floating {
   position: fixed !important;
   z-index: 35;
+  /* JS sets right, bottom and width (dragged, resized, remembered); these are the fallbacks */
   right: max(1rem, env(safe-area-inset-right));
   bottom: max(1rem, env(safe-area-inset-bottom));
-  width: min(24rem, calc(100vw - 2rem));
+  width: min(max(20rem, 38vw), 52rem, calc(100vw - 1rem));
+  max-width: calc(100vw - 1rem);
   margin: 0 !important;
-  padding: 0.45rem;
+  padding: 0 0.45rem 0.45rem;
   background: var(--sheet) !important;
   border: 1px solid var(--line) !important;
   border-radius: 0.9rem !important;
@@ -2257,11 +2267,81 @@ dialog.confirm-dlg[open] .confirm-box {
 .md .floating iframe {
   border-radius: 0.55rem;
 }
+.md .floating video {
+  width: 100%;
+}
 .md .floating figcaption {
   display: none;
 }
 .md .floating .media-tools {
   margin-top: 0.4rem;
+}
+/* top bar: resize corner + drag handle */
+.md .float-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  height: 1.9rem;
+  margin: 0 -0.45rem 0.1rem;
+}
+.md .float-bar button {
+  font: inherit;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink-2);
+  border-radius: 0.6rem;
+  touch-action: none; /* the finger drags the player, not the page */
+}
+.md .float-bar .float-grip {
+  flex: 1;
+  cursor: grab;
+  /* three short grip lines in the middle */
+  background-image:
+    linear-gradient(currentColor, currentColor), linear-gradient(currentColor, currentColor),
+    linear-gradient(currentColor, currentColor);
+  background-position:
+    center calc(50% - 4px),
+    center 50%,
+    center calc(50% + 4px);
+  background-size: 2.2rem 2px;
+  background-repeat: no-repeat;
+}
+.md .float-size {
+  flex: 0 0 2.2rem;
+  cursor: nwse-resize;
+  position: relative;
+}
+/* a corner mark pointing up-left */
+.md .float-size::before {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  top: 0.5rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-left: 2px solid currentColor;
+  border-top: 2px solid currentColor;
+  border-top-left-radius: 0.2rem;
+}
+.md .float-bar button:hover,
+.md .float-bar button:focus-visible {
+  color: var(--ink);
+}
+.md .float-bar button:hover {
+  background-color: var(--accent-soft);
+}
+.md .floating.dragging .float-bar .float-grip {
+  cursor: grabbing;
+}
+/* while dragging, the player can't catch the pointer and nothing gets text-selected */
+.md .floating.dragging iframe,
+.md .floating.dragging video {
+  pointer-events: none;
+}
+.md .floating.dragging {
+  user-select: none;
 }
 .rail-link {
   display: inline-flex;
@@ -2501,12 +2581,13 @@ td.neg {
   .nav-open,
   dialog,
   .md .media-tools,
+  .md .float-bar,
   .md .float-ph {
     display: none !important;
   }
   .md .floating {
     position: static !important;
-    width: auto;
+    width: auto !important;
     box-shadow: none;
   }
   html,
@@ -2906,4 +2987,275 @@ dialog.confirm-dlg.wide-dlg {
   .settings-cols {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ---------- appearance (Darstellung) ---------- */
+.ap-presets {
+  margin-bottom: 1.25rem;
+}
+.ap-presets .section-title {
+  margin: 0;
+}
+.ap-group {
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 1rem 0 0.5rem;
+}
+.ap-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
+  gap: 0.6rem;
+}
+.ap-preset {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 0.9rem 0.3rem 0.9rem 0.3rem;
+  cursor: pointer;
+}
+.ap-preset:hover {
+  border-color: var(--accent-2);
+}
+.ap-preset.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ap-preset-pic {
+  display: block;
+  height: 4rem;
+}
+.ap-preset-band {
+  display: block;
+  height: 1.25rem;
+}
+.ap-preset-card {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2.25rem;
+  margin: -0.5rem 0.5rem 0;
+  padding: 0 0.55rem;
+  border-radius: 0.5rem 0.15rem 0.5rem 0.15rem;
+  color: rgba(255, 255, 255, 0.9);
+}
+.ap-dot {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 50%;
+  flex: none;
+}
+.ap-bar {
+  margin-left: auto;
+  width: 2rem;
+  height: 0.35rem;
+  border-radius: 999px;
+  opacity: 0.6;
+}
+.ap-preset-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 550;
+}
+.ap-preset-name svg {
+  color: var(--accent);
+}
+.ap-label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+.ap-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border-radius: 0.6rem;
+  background: var(--line-2);
+}
+.ap-seg button {
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 0.45rem;
+  cursor: pointer;
+}
+.ap-seg button[aria-checked="true"] {
+  background: var(--sheet);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.ap-range {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.ap-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.ap-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.3rem 0.35rem 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: var(--sheet);
+  font-size: 0.92rem;
+}
+.ap-code {
+  display: block;
+  font-size: 0.75rem;
+}
+.ap-well {
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.ap-well::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.ap-well::-webkit-color-swatch {
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+}
+.ap-well::-moz-color-swatch {
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+}
+.ap-accents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.9rem;
+}
+.ap-accent {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+}
+.ap-accent.on {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.ap-sample {
+  margin: 0.6rem 0 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: var(--sheet);
+}
+.ap-layer {
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  padding: 0.2rem 0.9rem;
+  margin-bottom: 0.7rem;
+  background: var(--sheet);
+}
+.ap-layer.on {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+}
+.ap-layer > .row {
+  padding: 0.7rem 0;
+}
+.ap-layer > .switch {
+  border-bottom: 0;
+}
+.ap-layer-body {
+  padding-bottom: 0.8rem;
+}
+.ap-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.ap-image,
+.ap-upload {
+  aspect-ratio: 4 / 3;
+  border-radius: 0.55rem;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  padding: 0;
+  background: var(--panel);
+  cursor: pointer;
+}
+.ap-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ap-image.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ap-upload {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  border-style: dashed;
+  text-align: center;
+}
+.ap-gradients {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr));
+  gap: 0.5rem;
+}
+.ap-gradient {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  cursor: pointer;
+}
+.ap-gradient > span {
+  display: block;
+  height: 2.8rem;
+  margin-bottom: 0.3rem;
+}
+.ap-gradient {
+  padding-bottom: 0.35rem;
+  text-indent: 0.55rem;
+}
+.ap-gradient.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ap-css {
+  width: 100%;
+  font-size: 0.85rem;
+  resize: vertical;
 }

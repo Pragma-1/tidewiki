@@ -19,6 +19,7 @@ export const POST = api("admin", async ({ user, ip, t, lang }) => {
   if (!(await isMailConfigured())) throw new HttpError(400, "E-mail is not configured.");
   const site = (await getSettings()).site_name;
   const mail = renderMail({
+    lang,
     site,
     heading: t("Your e-mail settings work"),
     preheader: t("This is a test message from {site}.", { site }),

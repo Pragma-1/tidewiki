@@ -102,7 +102,8 @@ Rechtsgrundlage ist Art. 6 Abs. 1 lit. f DSGVO; das berechtigte Interesse liegt 
 | \`wiki_session\` | hält Sie nach der Anmeldung angemeldet | bis zur Abmeldung, höchstens ${cfg.session_hours} Stunden |
 | \`wiki_mfa\` | Zwischenschritt der Zwei-Faktor-Anmeldung | 5 Minuten |
 | \`lang\`, \`theme\` | merkt sich Sprache bzw. helles/dunkles Design, wenn Sie umschalten | 1 Jahr |
-| \`tidewiki:draft:…\` (lokaler Speicher) | ungespeicherte Entwürfe im Editor, nur in Ihrem Browser | bis zum Speichern oder Verwerfen |${
+| \`tidewiki:draft:…\` (lokaler Speicher) | ungespeicherte Entwürfe im Editor, nur in Ihrem Browser | bis zum Speichern oder Verwerfen |
+| \`tidewiki:display\`, \`tidewiki:pip\` (lokaler Speicher) | Anzeigegröße auf diesem Gerät bzw. Lage und Größe des Mini-Players, nur in Ihrem Browser | bis Sie sie zurücksetzen oder die Website-Daten löschen |${
     c.cloudflare
       ? `
 | \`__cf_bm\` | Cloudflare: unterscheidet Menschen von automatisierten Zugriffen (Bot-Schutz) | 30 Minuten ab der letzten Aktivität |
@@ -209,7 +210,8 @@ The legal basis is Art. 6(1)(f) GDPR; the legitimate interest is secure and avai
 | \`wiki_session\` | keeps you signed in | until you sign out, at most ${cfg.session_hours} hours |
 | \`wiki_mfa\` | intermediate step of two-factor sign-in | 5 minutes |
 | \`lang\`, \`theme\` | remembers language or light/dark design when you switch | 1 year |
-| \`tidewiki:draft:…\` (local storage) | unsaved editor drafts, kept only in your browser | until saved or discarded |${
+| \`tidewiki:draft:…\` (local storage) | unsaved editor drafts, kept only in your browser | until saved or discarded |
+| \`tidewiki:display\`, \`tidewiki:pip\` (local storage) | display size on this device, and position and size of the mini player; kept only in your browser | until you reset them or clear the site data |${
     c.cloudflare
       ? `
 | \`__cf_bm\` | Cloudflare: tells people apart from automated access (bot protection) | 30 minutes after the last activity |

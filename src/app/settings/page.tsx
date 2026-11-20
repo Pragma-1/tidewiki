@@ -5,6 +5,7 @@ import {
   History,
   Images,
   Mail,
+  Palette,
   Scale,
   ShieldCheck,
   SlidersHorizontal,
@@ -16,6 +17,8 @@ import { UsersPanel } from "@/components/users-panel";
 import { AuditLog } from "@/components/audit-log";
 import { LegalEditor } from "@/components/legal-editor";
 import { MediaPanel } from "@/components/media-panel";
+import { AppearancePanel } from "@/components/appearance-panel";
+import { appearanceFrom } from "@/lib/appearance";
 import { DataPanel } from "@/components/data-panel";
 import { BackupsPanel } from "@/components/backups-panel";
 import { backupRoots, DEFAULT_BACKUP_DIR, hasS3Secret, listBackups, localBackupDir } from "@/lib/backup";
@@ -24,6 +27,7 @@ import { DATA_DIR, LIMITS } from "@/lib/config";
 import { getTree, type TreeNode } from "@/lib/pages";
 import { formatDate } from "@/lib/i18n";
 import { getLang } from "@/lib/i18n-server";
+import { localTree, localVersions } from "@/lib/system-pages";
 import { statSync } from "node:fs";
 import { all, sql } from "@/lib/db";
 import { enabledLegalKeys, missingOperatorFields } from "@/lib/legal";
@@ -42,7 +46,18 @@ export async function generateMetadata() {
   return { title: (await getT())("Settings") };
 }
 
-const TABS = ["general", "security", "mail", "people", "legal", "media", "data", "backups", "log"] as const;
+const TABS = [
+  "general",
+  "appearance",
+  "security",
+  "mail",
+  "people",
+  "legal",
+  "media",
+  "data",
+  "backups",
+  "log",
+] as const;
 type Tab = (typeof TABS)[number];
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
@@ -55,6 +70,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const locked = users.filter((u) => u.locked_until).length;
   const tabs: { id: Tab; label: string; icon: typeof Users; badge?: number }[] = [
     { id: "general", label: t("General"), icon: SlidersHorizontal },
+    { id: "appearance", label: t("Appearance"), icon: Palette },
     { id: "security", label: t("Security"), icon: ShieldCheck },
     { id: "mail", label: t("E-mail"), icon: Mail },
     { id: "people", label: t("People"), icon: Users, badge: locked || undefined },
@@ -98,6 +114,16 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           )}
           <SettingsPanel initial={cfg} />
         </>
+      )}
+      {tab === "appearance" && (
+        <AppearancePanel
+          initial={appearanceFrom(cfg.appearance)}
+          initialCss={cfg.custom_css}
+          isOwner={user.isOwner}
+          images={(await listMedia())
+            .filter((m) => m.kind === "image" && m.mime !== "image/svg+xml")
+            .map((m) => ({ name: m.name, title: m.original_name ?? m.name }))}
+        />
       )}
       {tab === "security" && (
         <SettingsPanel
@@ -157,7 +183,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               walk(n.children, d + 1);
             }
           };
-          walk(await getTree(), 1);
+          walk(localTree(await getTree(), await localVersions(await getLang())), 1);
           return <DataPanel pages={flat} maxDepth={LIMITS.maxPageDepth} />;
         })())}
       {tab === "backups" &&

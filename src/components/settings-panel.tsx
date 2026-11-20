@@ -156,6 +156,14 @@ const SECTIONS: { title: string; rows: Row[] }[] = [
     title: msg("Site"),
     rows: [
       { key: "site_name", kind: "text", title: msg("Site name"), desc: msg("Shown in the header and in e-mails.") },
+      {
+        key: "language",
+        kind: "lang",
+        title: msg("Default language"),
+        desc: msg(
+          "For everyone who hasn't picked a language with the DE/EN button in the header, and for e-mails sent without a visitor's choice. The built-in pages follow while nobody has edited them; pages people write stay as written.",
+        ),
+      },
     ],
   },
   {

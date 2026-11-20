@@ -28,6 +28,7 @@ Run these before opening a pull request; CI runs the same.
 
 ```bash
 npm run check       # TypeScript, ESLint, Prettier, unit tests
+npm run fonts       # copies the selectable fonts to public/fonts (runs by itself before dev, build and test)
 npm run build       # production build
 npm run test:e2e    # end-to-end against the built server
 ```

@@ -434,6 +434,7 @@ export async function requestPasswordReset(email: string, ip: string | null, lan
   const site = cfg.site_name;
   const t = (x: string, p?: Record<string, string | number>) => translate(lang, x, p);
   const mail = renderMail({
+    lang,
     site,
     heading: t("Reset your password"),
     preheader: t("Open the link within 30 minutes to choose a new password."),
@@ -699,6 +700,7 @@ export async function updateProfile(
       const site = cfg.site_name;
       const t = (x: string, p?: Record<string, string | number>) => translate(lang, x, p);
       const mail = renderMail({
+        lang,
         site,
         heading: t("Your e-mail address was changed"),
         paragraphs: [

@@ -22,7 +22,7 @@
   <img src="docs/screenshots/page.png" alt="A wiki page with chapter navigation, table of contents, callout and task list" width="880">
 </p>
 
-> The interface is in **German**. Code, documentation and translation keys are English.
+> The interface is in **German** by default and fully available in **English**: the _DE/EN_ button in the header switches it for each reader, and the owner sets the default. Code, documentation and translation keys are English.
 
 ## Contents
 
@@ -45,12 +45,23 @@
 - Chapters and pages in Markdown with a live preview, toolbar, drafts that survive a closed tab, and `Ctrl/⌘+S`.
 - Pages update **live** for everyone reading them (Server-Sent Events); edit conflicts are detected, never silently overwritten.
 - Tables, task lists, footnotes, callouts, collapsible blocks, syntax highlighting with a copy button, `[[wiki links]]`, backlinks, previous/next navigation, table of contents, print layout, light and dark theme.
-- Images and videos by upload, paste or drag & drop. YouTube and Vimeo load only after a click (two-click privacy). Every video has **picture-in-picture**.
+- Images and videos by upload, paste or drag & drop. YouTube and Vimeo load only after a click (two-click privacy). Every video has **picture-in-picture**: a mini player (a good share of the window, never tiny) that keeps playing while you scroll, can be dragged anywhere and resized from its corner — with the mouse, a finger or the arrow keys — and is remembered per browser.
 - Links to other sites open in a new tab (`rel="noopener"`), internal links stay put.
+- German and English: every reader picks with the _DE/EN_ button (a cookie), the owner sets the default for everyone else and for e-mails. The built-in pages follow the reader's language until someone edits them.
 - Version history with a line diff, restore of any version, edit summaries, and a "recent changes" feed.
 - A trash: deleted pages keep their whole history for 30 days.
 - _Seiten verwalten_: all pages as a tree with checkboxes to delete many at once (a chapter ticks its sub-pages, shift-click selects a range, filter). Editors delete their own pages, administrators any — all or nothing.
 - Import and export: single pages as `.md`, the whole wiki as a ZIP (pages, chapters as folders, media), new pages straight from a `.md` file. Before importing a ZIP you can arrange it: change the order, make pages main pages or sub-pages, put them under an existing page, rename them or leave them out.
+
+**Looks** (_Einstellungen → Darstellung_, the same choices as Tidedeck)
+
+- 29 presets in four groups — Tide (Tidewiki's own design and its relatives), colour schemes (Nord, Dracula, Gruvbox, Catppuccin, Tokyo Night, Rosé Pine, Solarized), styles (Synthwave, Terminal, Typewriter, Editorial, Blueprint, Arcade, Poster, Notebook) and sea and nature looks.
+- 27 self-hosted fonts in groups (clean, friendly, serif, futuristic, condensed, retro, handwritten, monospace) or any font installed on the device. A page loads only the font in use; nothing comes from Google.
+- Accent colour (presets or your own, separately for light and dark — the light one is derived with enough contrast if you don't pick it), default theme for everyone who hasn't chosen one.
+- Background in layers: theme grey or your own page colour (the content area, lines and fields are tinted to match), an image from the wiki's uploads (blurred, darkened towards the page colour) and a gradient on top. Each layer switches on and off and keeps its settings.
+- Header band colours, content-area opacity (frosted glass over the background), size (grows with big screens, or fixed; one browser — the wall TV — can have its own) and page width.
+- The owner's own CSS on top — it may restyle anything but not load anything from other servers.
+- Everything shows on the page as you change it and is saved a moment later.
 
 **Search**
 
@@ -292,7 +303,13 @@ docker build -t astaldoo/tidewiki:latest .
 docker buildx build --platform linux/amd64,linux/arm64 -t astaldoo/tidewiki:latest --push .
 ```
 
-The GitHub workflow in [`.github/workflows/docker.yml`](.github/workflows/docker.yml) does the multi-arch build and push automatically once `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are set as repository secrets.
+**Publishing** happens on GitHub, the same way as for Tidedeck ([`.github/workflows/docker.yml`](.github/workflows/docker.yml)): every push to `main` first runs the whole CI (checks, unit and end-to-end tests on Node 22 and 24, dependency audit, image build and a compose-stack start). Only if all of that passes it pushes `astaldoo/tidewiki` for amd64 and arm64:
+
+- push to `main` → `:latest`, plus `:<version>` and `:<major>.<minor>` the first time the version in `package.json` is published (later pushes of the same version only move `:latest`, so a version tag never changes);
+- tag `v<version>` → that version again (the tag must match `package.json`);
+- pushes that change only docs or Markdown files build nothing.
+
+To release a new version, raise `version` in `package.json` (and add it to the changelog) and push. Needs the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub access token with _Read & Write_); another image name can be set as the repository variable `DOCKERHUB_IMAGE`. Images carry provenance and an SBOM; the workflow's actions are pinned to exact commits.
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 

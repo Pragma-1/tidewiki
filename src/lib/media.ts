@@ -405,7 +405,13 @@ export type ListedMedia = MediaRow & {
   in_trash: number;
   /** only older versions of pages show it */
   in_history: boolean;
+  /** the background image, or used in the custom CSS */
+  in_settings: boolean;
 };
+
+/** The look (background image) and the owner's CSS can use uploaded images too. */
+const IN_SETTINGS = sql`EXISTS (SELECT 1 FROM settings s WHERE s.key IN ('appearance', 'custom_css')
+                          AND strpos(s.value, '/media/' || m.name) > 0)`;
 
 /**
  * Every file with where it is used. Each text is scanned once for /media/… references (not once
@@ -425,7 +431,8 @@ export async function listMedia(): Promise<ListedMedia[]> {
           SELECT DISTINCT m[1] FROM trash_revisions r, regexp_matches(r.content, ${NAME_IN_TEXT}, 'g') m
         )
         SELECT m.*, u.username, COALESCE(cur.n, 0) AS used_in, COALESCE(bin.n, 0) AS in_trash,
-               (hist.name IS NOT NULL AND cur.n IS NULL AND bin.n IS NULL) AS in_history
+               (hist.name IS NOT NULL AND cur.n IS NULL AND bin.n IS NULL) AS in_history,
+               ${IN_SETTINGS} AS in_settings
         FROM media m
         LEFT JOIN users u ON u.id = m.created_by
         LEFT JOIN cur ON cur.name = m.name
@@ -466,12 +473,14 @@ export async function deleteMedia(id: number, actor: { id: number; role: string 
 }
 
 /**
- * Deletes every file no page and no page in the trash shows (files only older versions show are
+ * Deletes every file no page, no page in the trash and not the look (background image, custom CSS) shows (files only older versions show are
  * deleted too — those versions then show a gap). Also removes stray files on disk that have no
  * entry (left over by a crash) and abandoned partial uploads. Administrators only.
  */
 export async function deleteUnusedMedia(): Promise<{ files: MediaRow[]; strays: number; bytes: number }> {
-  const unused = (await listMedia()).filter((m) => m.used_in === 0 && m.in_trash === 0).map((m) => m.id);
+  const unused = (await listMedia())
+    .filter((m) => m.used_in === 0 && m.in_trash === 0 && !m.in_settings)
+    .map((m) => m.id);
   const files = unused.length
     ? await tx(async () => {
         // checked again under the lock: a page saved meanwhile may use one of them now
@@ -479,6 +488,7 @@ export async function deleteUnusedMedia(): Promise<{ files: MediaRow[]; strays: 
           sql`SELECT * FROM media m WHERE m.id = ANY(${unused}::bigint[])
                 AND NOT EXISTS (SELECT 1 FROM pages p WHERE strpos(p.content, '/media/' || m.name) > 0)
                 AND NOT EXISTS (SELECT 1 FROM trash t WHERE strpos(t.content, '/media/' || m.name) > 0)
+                AND NOT ${IN_SETTINGS}
               FOR UPDATE`,
         );
         if (rows.length) await deleteRows(rows.map((r) => r.id));

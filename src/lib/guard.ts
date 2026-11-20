@@ -16,3 +16,14 @@ export async function gate(need: Need, opts: { allowPending2fa?: boolean } = {})
   if (need === "admin" && user?.role !== "admin") redirect("/");
   return user;
 }
+
+/**
+ * The rule of gate("read") without redirecting — for generateMetadata, which Next renders next to
+ * the page: a page title must not reach someone the page itself turns away.
+ */
+export async function mayRead(): Promise<boolean> {
+  if ((await userCount()) === 0) return false;
+  const user = await getCurrentUser();
+  if (user) return !user.needs2faSetup;
+  return (await getSettings()).public_read;
+}

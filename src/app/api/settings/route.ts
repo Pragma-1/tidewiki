@@ -30,6 +30,7 @@ export const PUT = api("admin", async ({ body, user, ip }) => {
   // Where backups go is changed only through /api/backups/target (password + connection test).
   if (Object.keys(b).some((k) => k === "backup_target" || k === "backup_local_dir" || k.startsWith("backup_s3_")))
     throw new HttpError(400, "Change the backup storage in the backup settings.");
+  if ("appearance" in b || "custom_css" in b) throw new HttpError(400, "Change the look under Appearance.");
 
   // The SMTP password is write-only and stored encrypted, outside the regular settings.
   let pw: string | null | undefined;

@@ -22,11 +22,13 @@ type File = {
   in_trash: number;
   /** only older versions show it */
   in_history: boolean;
+  /** the background image, or used in the custom CSS */
+  in_settings: boolean;
 };
 const size = (b: number) =>
   b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
 /** Nothing current shows it: no page, no page in the trash. */
-const unusedFile = (f: File) => f.used_in === 0 && f.in_trash === 0;
+const unusedFile = (f: File) => f.used_in === 0 && f.in_trash === 0 && !f.in_settings;
 
 export function MediaPanel({ files, used, quota }: { files: File[]; used: number; quota: number }) {
   const t = useT();
@@ -67,6 +69,7 @@ export function MediaPanel({ files, used, quota }: { files: File[]; used: number
     const live = list.filter((f) => f.used_in > 0).length;
     const bin = list.filter((f) => f.used_in === 0 && f.in_trash > 0).length;
     const hist = list.filter((f) => unusedFile(f) && f.in_history).length;
+    const look = list.filter((f) => f.in_settings).length;
     return (
       <>
         {live > 0 && (
@@ -74,6 +77,11 @@ export function MediaPanel({ files, used, quota }: { files: File[]; used: number
         )}
         {bin > 0 && (
           <p>{t("{n} are shown on deleted pages in the trash; restored, those pages would miss them.", { n: bin })}</p>
+        )}
+        {look > 0 && (
+          <p>
+            {t("{n} are used by the look (background image or custom CSS); it will show without them.", { n: look })}
+          </p>
         )}
         {hist > 0 && (
           <p>{t("{n} appear only in older versions of pages; those versions will miss them.", { n: hist })}</p>
@@ -170,6 +178,8 @@ export function MediaPanel({ files, used, quota }: { files: File[]; used: number
   const usage = (f: File) =>
     f.used_in ? (
       t("{n} page(s)", { n: f.used_in })
+    ) : f.in_settings ? (
+      <span className="badge">{t("look (background)")}</span>
     ) : f.in_trash ? (
       <span className="badge">{t("only in the trash")}</span>
     ) : f.in_history ? (

@@ -65,7 +65,7 @@ export function api<P = Record<string, never>>(
   return async (req: NextRequest, route: { params: Promise<P> }): Promise<Response> => {
     let lang: Lang = "en";
     try {
-      lang = langFromRequest(req);
+      lang = await langFromRequest(req);
     } catch {
       /* settings unavailable: fall back to English */
     }

@@ -10,7 +10,9 @@ export async function register() {
   const { importSqliteIfPresent } = await import("./lib/sqlite-import");
   await importSqliteIfPresent();
   const { syncSystemPages } = await import("./lib/seed");
-  await syncSystemPages("de"); // built-in pages follow the site language while unedited
+  const { getSettings } = await import("./lib/settings");
+  // built-in pages follow the wiki's default language while nobody has edited them
+  await syncSystemPages((await getSettings()).language);
   const { startRetentionJob } = await import("./lib/retention");
   startRetentionJob(); // GDPR storage limitation for logs, IPs, sessions; 30-day trash
   const { startBackupJob } = await import("./lib/backup");

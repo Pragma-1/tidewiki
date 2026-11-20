@@ -17,8 +17,9 @@ import { getSettings } from "@/lib/settings";
 import { getTree, type TreeNode } from "@/lib/pages";
 import { trashCount } from "@/lib/trash";
 import { getLang } from "@/lib/i18n-server";
+import { localTree, localVersions } from "@/lib/system-pages";
 import { makeT } from "@/lib/i18n";
-import { LiveUpdates, LogoutButton, MenuButton, NavDrawer, ThemeToggle } from "./chrome";
+import { LangToggle, LiveUpdates, LogoutButton, MenuButton, NavDrawer, ThemeToggle } from "./chrome";
 import { EmbedActivator } from "./embeds";
 import { HeaderSearch } from "./header-search";
 
@@ -70,7 +71,7 @@ export async function Shell({
   const t = makeT(lang);
   const canRead = !!user || cfg.public_read;
   const canEdit = !!user && user.role !== "viewer" && !user.needs2faSetup;
-  const tree = canRead ? await getTree() : [];
+  const tree = canRead ? localTree(await getTree(), await localVersions(lang)) : [];
   const trashed = canEdit ? await trashCount() : 0;
   return (
     <>
@@ -86,6 +87,7 @@ export async function Shell({
           </Link>
           {canRead && <HeaderSearch />}
           <div className="top-actions">
+            <LangToggle />
             <ThemeToggle />
             {user ? (
               <>

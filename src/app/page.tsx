@@ -5,6 +5,7 @@ import { gate } from "@/lib/guard";
 import { getTree, recentPages, type TreeNode } from "@/lib/pages";
 import { getSettings } from "@/lib/settings";
 import { getLang } from "@/lib/i18n-server";
+import { localTitle, localTree, localVersions } from "@/lib/system-pages";
 import { formatDate, makeT } from "@/lib/i18n";
 export const dynamic = "force-dynamic";
 
@@ -13,10 +14,11 @@ const flatten = (n: TreeNode): TreeNode[] => n.children.flatMap((c) => [c, ...fl
 export default async function Home() {
   const user = await gate("read");
   const cfg = await getSettings();
-  const tree = await getTree();
-  const recent = await recentPages(8);
-  const canEdit = !!user && user.role !== "viewer";
   const lang = await getLang();
+  const local = await localVersions(lang);
+  const tree = localTree(await getTree(), local);
+  const recent = (await recentPages(8)).map((r) => localTitle(r, local));
+  const canEdit = !!user && user.role !== "viewer";
   const t = makeT(lang);
   return (
     <Shell>

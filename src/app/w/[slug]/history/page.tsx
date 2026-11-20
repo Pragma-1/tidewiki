@@ -7,6 +7,7 @@ import { RestoreVersionButton } from "@/components/page-actions";
 import { gate } from "@/lib/guard";
 import { getPage, getRevision, listRevisions, revisionCount, type RevisionRow } from "@/lib/pages";
 import { renderMarkdown } from "@/lib/markdown";
+import { localTitle, localVersions } from "@/lib/system-pages";
 import { getLang, getT } from "@/lib/i18n-server";
 import { formatDate, makeT, type T } from "@/lib/i18n";
 import { SLUG_RE } from "@/lib/validate";
@@ -115,7 +116,9 @@ export default async function History({
   return (
     <Shell active={page.slug} rev={page.rev} wide>
       <div className="crumbs">
-        <Link href={`/w/${page.slug}`}>← {t("Back to {title}", { title: page.title })}</Link>
+        <Link href={`/w/${page.slug}`}>
+          ← {t("Back to {title}", { title: localTitle(page, await localVersions(lang)).title })}
+        </Link>
       </div>
       <h1 style={{ marginTop: 0 }}>{t("History")}</h1>
       <p className="hint" style={{ marginTop: "-.4rem" }}>

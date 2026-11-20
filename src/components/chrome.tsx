@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Menu, Moon, RefreshCw, Sun, X, LogOut } from "lucide-react";
+import { Languages, LogOut, Menu, Moon, RefreshCw, Sun, X } from "lucide-react";
 import { call } from "@/lib/client-api";
-import { useT } from "./i18n";
+import { useLang, useT } from "./i18n";
 import { msg } from "@/lib/msg";
 
 /** Hamburger in the header (narrow screens only); opens the page drawer. */
@@ -89,6 +89,36 @@ export function ThemeToggle() {
       title={dark ? t("Switch to light theme") : t("Switch to dark theme")}
     >
       {dark ? <Sun size={18} aria-hidden /> : <Moon size={18} aria-hidden />}
+    </button>
+  );
+}
+
+/**
+ * DE / EN: switches the interface for this browser (a cookie) and redraws the page. Pages people
+ * wrote stay as written; the built-in pages follow while nobody has edited them.
+ */
+export function LangToggle() {
+  const t = useT();
+  const lang = useLang();
+  const router = useRouter();
+  const next = lang === "de" ? "en" : "de";
+  const label = next === "en" ? "Switch to English" : "Auf Deutsch umschalten";
+  return (
+    <button
+      type="button"
+      className="icon-btn lang-btn"
+      lang={next}
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        setCookie("lang", next);
+        document.documentElement.lang = next;
+        router.refresh();
+      }}
+    >
+      <Languages size={18} aria-hidden />
+      <span aria-hidden>{next.toUpperCase()}</span>
+      <span className="sr-only">{t("Language")}</span>
     </button>
   );
 }

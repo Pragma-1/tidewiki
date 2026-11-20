@@ -304,7 +304,15 @@ const likeArg = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const MAX_CANDIDATES = 3000;
 
-export async function search(q: string, opts: { limit?: number; budgetMs?: number } = {}): Promise<SearchResult> {
+export async function search(
+  q: string,
+  opts: {
+    limit?: number;
+    budgetMs?: number;
+    /** Built-in pages shown in the reader's language (slug → shown title and text): searched as shown. */
+    local?: Map<string, { title: string; content: string }>;
+  } = {},
+): Promise<SearchResult> {
   const terms = parseQuery(q);
   if (!terms.length) return { hits: [], total: 0, partial: false };
   if (cpuExhausted()) throw new HttpError(503, "Search is busy right now. Try again in a moment.");
@@ -319,11 +327,29 @@ export async function search(q: string, opts: { limit?: number; budgetMs?: numbe
       const l = likeArg(longest);
       return sql`(title LIKE ${l} OR body LIKE ${l})`;
     });
-    const ids = (
-      await all<{ id: number }>(
-        sql`SELECT page_id AS id FROM search_idx WHERE ${sql.join(where, sql` AND `)} LIMIT ${MAX_CANDIDATES}`,
+    // unedited built-in pages the reader sees in another language than stored: matched, ranked and
+    // highlighted in the text they actually see (at most a handful, checked here instead of in SQL)
+    const shown = new Map<number, { title: string; plain: string; ftitle: string; fbody: string }>();
+    if (opts.local?.size) {
+      const rows = await all<{ id: number; slug: string }>(
+        sql`SELECT id, slug FROM pages WHERE slug = ANY(${[...opts.local.keys()]}::text[])`,
+      );
+      for (const r of rows) {
+        const v = opts.local.get(r.slug)!;
+        const plain = markdownToPlain(v.content).slice(0, MAX_PLAIN);
+        shown.set(r.id, { title: v.title, plain, ftitle: fold(v.title), fbody: fold(plain) });
+      }
+    }
+    const ids = [
+      ...(
+        await all<{ id: number }>(
+          sql`SELECT page_id AS id FROM search_idx WHERE ${sql.join(where, sql` AND `)} LIMIT ${MAX_CANDIDATES}`,
+        )
       )
-    ).map((r) => r.id);
+        .map((r) => r.id)
+        .filter((id) => !shown.has(id)),
+      ...shown.keys(),
+    ];
 
     const scored: { id: number; score: number }[] = [];
     let partial = ids.length >= MAX_CANDIDATES;
@@ -336,7 +362,9 @@ export async function search(q: string, opts: { limit?: number; budgetMs?: numbe
       const rows = await all<{ id: number; title: string; body: string }>(
         sql`SELECT page_id AS id, title, body FROM search_idx WHERE page_id = ANY(${ids.slice(i, i + 25)}::bigint[])`,
       );
-      for (const r of rows) {
+      for (const row of rows) {
+        const alt = shown.get(row.id);
+        const r = alt ? { id: row.id, title: alt.ftitle, body: alt.fbody } : row;
         if (performance.now() > deadline) {
           partial = true;
           break outer;
@@ -372,8 +400,10 @@ export async function search(q: string, opts: { limit?: number; budgetMs?: numbe
     );
     const hits: SearchHit[] = [];
     for (const { id, score } of top) {
-      const p = pages.get(id);
-      if (!p) continue;
+      const stored = pages.get(id);
+      if (!stored) continue;
+      const alt = shown.get(id);
+      const p = alt ? { ...stored, title: alt.title, plain: alt.plain } : stored;
       const late = performance.now() > deadline + 150;
       hits.push({
         slug: p.slug,

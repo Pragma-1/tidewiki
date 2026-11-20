@@ -6,7 +6,8 @@ import { search, MAX_QUERY, type SearchResult } from "@/lib/search";
 import { Segments } from "@/components/segments";
 import { Notice } from "@/components/ui";
 import { consume } from "@/lib/rate-limit";
-import { getT } from "@/lib/i18n-server";
+import { getLang, getT } from "@/lib/i18n-server";
+import { localVersions } from "@/lib/system-pages";
 import { getCurrentUser } from "@/lib/session-cookie";
 import { headers } from "next/headers";
 import { clientIp } from "@/lib/net";
@@ -32,7 +33,7 @@ export default async function Search({ searchParams }: { searchParams: Promise<{
     if (!(await consume(bucket, user || ip ? 240 : 3000, 60))) error = t("Slow down a little.");
     else {
       try {
-        result = await search(q, { limit: LIMIT, budgetMs: 800 });
+        result = await search(q, { limit: LIMIT, budgetMs: 800, local: await localVersions(await getLang()) });
       } catch (e) {
         if (e instanceof HttpError) error = t(e.message);
         else throw e;

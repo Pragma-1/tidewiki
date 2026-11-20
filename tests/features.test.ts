@@ -12,6 +12,8 @@ import { translate, formatDuration } from "@/lib/i18n";
 import { DE } from "@/lib/i18n-de";
 import { createPage, getPage } from "@/lib/pages";
 import { syncSystemPages, SYSTEM_PAGES } from "@/lib/seed";
+import { localVersions } from "@/lib/system-pages";
+import { search } from "@/lib/search";
 import { renderMarkdown } from "@/lib/markdown";
 import { updateSettings } from "@/lib/settings";
 // @ts-expect-error plain ESM helper without types
@@ -93,7 +95,7 @@ describe("setup + built-in pages in German", () => {
   });
   it("an untouched guide from an earlier release is upgraded to the current one (with the new sections)", async () => {
     const legacyDe = SYSTEM_PAGES["markdown-guide"].legacy!.filter((v) => v.title === "Markdown-Anleitung");
-    expect(legacyDe.length).toBe(2); // v1 and v2
+    expect(legacyDe.length).toBe(3); // v1, v2 and v3
     for (const old of legacyDe) {
       await db().prepare("UPDATE pages SET title=?, content=? WHERE slug='markdown-guide'").run(old.title, old.content);
       expect(await syncSystemPages("de")).toBe(1);
@@ -104,6 +106,7 @@ describe("setup + built-in pages in German", () => {
     for (const section of [
       "## Links",
       "Bild-in-Bild",
+      "Ecke oben links",
       "neuen Tab",
       "## Codeblöcke kopieren",
       "## Markdown-Dateien importieren",
@@ -115,6 +118,23 @@ describe("setup + built-in pages in German", () => {
     const html = renderMarkdown(cur, { lang: "de" }).html;
     expect(html).toContain("<table");
     expect(html).not.toContain("::: ");
+    expect(SYSTEM_PAGES["markdown-guide"].versions.en.content).toContain("top-left corner");
+  });
+  it("readers who chose the other language see unedited built-in pages in it, and find them by that text", async () => {
+    const en = await localVersions("en");
+    expect(en.get("welcome")?.title).toBe("Welcome");
+    expect(en.get("markdown-guide")?.content).toBe(SYSTEM_PAGES["markdown-guide"].versions.en.content);
+    expect((await localVersions("de")).size).toBe(0); // stored in German already
+    // "detached" is only in the English guide
+    expect((await search("detached")).hits).toEqual([]);
+    const hit = (await search("detached", { local: en })).hits.find((h) => h.slug === "markdown-guide");
+    expect(hit?.title.map((x) => x.t).join("")).toBe("Markdown guide");
+    expect(hit?.snippet.some((x) => x.hit && x.t === "detached")).toBe(true);
+    // German text is not found for an English reader (they don't see it)
+    expect((await search("Anleitung", { local: en })).hits.some((h) => h.slug === "markdown-guide")).toBe(false);
+    // edited: shown as written, in every language
+    await db().prepare("UPDATE pages SET content=content||'\nlokale Notiz' WHERE slug='welcome'").run();
+    expect((await localVersions("en")).has("welcome")).toBe(false);
   });
 });
 

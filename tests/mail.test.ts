@@ -51,6 +51,7 @@ function fakeSmtp(port: number) {
 describe("mail template", () => {
   it("escapes every value and only allows http(s) links", async () => {
     const m = renderMail({
+      lang: "en",
       site: `<script>alert(1)</script>`,
       heading: `"><img src=x onerror=alert(1)>`,
       paragraphs: ["a & b <b>"],
@@ -65,6 +66,7 @@ describe("mail template", () => {
     expect(m.html).toContain("&lt;script&gt;");
     expect(m.text).toContain("a & b <b>"); // text part is plain text, nothing to escape
     const ok = renderMail({
+      lang: "en",
       site: "W",
       heading: "H",
       paragraphs: [],
@@ -105,7 +107,11 @@ describe("SMTP from the settings page", () => {
   });
 
   it("sends a multipart mail with the HTML design and a text part; header injection is impossible", async () => {
-    const m = renderMail({ site: "Tidewiki", heading: "Test", paragraphs: ["Hallo"], footer: "Fuß" });
+    const m = renderMail({ lang: "de", site: "Tidewiki", heading: "Test", paragraphs: ["Hallo"], footer: "Fuß" });
+    expect(m.html).toContain('<html lang="de">');
+    expect(renderMail({ lang: "en", site: "W", heading: "H", paragraphs: [], footer: "" }).html).toContain(
+      '<html lang="en">',
+    );
     await sendMail("admin@example.org", "Betreff\r\nBcc: victim@example.org", m.text, m.html);
     expect(smtp.received).toHaveLength(1);
     const raw = smtp.received[0];

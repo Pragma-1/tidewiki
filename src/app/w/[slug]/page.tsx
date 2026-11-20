@@ -5,13 +5,14 @@ import { ArrowLeft, ArrowRight, Download, History, Link2, Pencil } from "lucide-
 import { Shell } from "@/components/shell";
 import { DeleteButton } from "@/components/page-actions";
 import { Notice } from "@/components/ui";
-import { gate } from "@/lib/guard";
+import { gate, mayRead } from "@/lib/guard";
 import { backlinks, breadcrumbs, getPage, getTree, readingOrder, type TreeNode } from "@/lib/pages";
 import { renderMarkdown } from "@/lib/markdown";
 import { getLang } from "@/lib/i18n-server";
 import { formatDate, makeT } from "@/lib/i18n";
 import { SLUG_RE } from "@/lib/validate";
 import { getSettings, renderSettings } from "@/lib/settings";
+import { localPage, localTitle, localTree, localVersions } from "@/lib/system-pages";
 export const dynamic = "force-dynamic";
 
 type Props = { params: Promise<{ slug: string }>; searchParams?: Promise<{ moved?: string }> };
@@ -25,8 +26,10 @@ const find = (nodes: TreeNode[], id: number): TreeNode | undefined => {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  const t = makeT(await getLang());
-  return { title: SLUG_RE.test(slug) ? ((await getPage(slug))?.title ?? t("Page not found")) : t("Page not found") };
+  if (!(await mayRead())) return {}; // the page redirects to the sign-in; its title stays private
+  const lang = await getLang();
+  const page = SLUG_RE.test(slug) && slug.length <= 80 ? await getPage(slug) : undefined;
+  return { title: page ? localPage(page, await localVersions(lang)).title : makeT(lang)("Page not found") };
 }
 
 export default async function WikiPage({ params, searchParams }: Props) {
@@ -34,19 +37,21 @@ export default async function WikiPage({ params, searchParams }: Props) {
   const moved = (await searchParams)?.moved === "1";
   const user = await gate("read");
   if (!SLUG_RE.test(slug) || slug.length > 80) notFound();
-  const page = await getPage(slug);
-  if (!page) notFound();
-  const children = find(await getTree(), page.id)?.children ?? [];
+  const stored = await getPage(slug);
+  if (!stored) notFound();
+  const lang = await getLang();
+  const t = makeT(lang);
+  const local = await localVersions(lang);
+  const page = localPage(stored, local);
+  const children = find(localTree(await getTree(), local), page.id)?.children ?? [];
   const canEdit = !!user && user.role !== "viewer";
   const canDelete = !!user && (user.role === "admin" || (user.role !== "viewer" && page.created_by === user.id));
-  const crumbs = await breadcrumbs(page);
-  const linkedFrom = await backlinks(page.slug);
-  const order = await readingOrder();
+  const crumbs = (await breadcrumbs(page)).map((c) => localTitle(c, local));
+  const linkedFrom = (await backlinks(page.slug)).map((b) => localTitle(b, local));
+  const order = (await readingOrder()).map((o) => localTitle(o, local));
   const at = order.findIndex((o) => o.slug === page.slug);
   const prev = at > 0 ? order[at - 1] : null,
     next = at >= 0 && at < order.length - 1 ? order[at + 1] : null;
-  const lang = await getLang();
-  const t = makeT(lang);
   const { html, toc } = renderMarkdown(page.content, {
     lang,
     ...renderSettings(await getSettings()),

@@ -4,7 +4,25 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
-The next release is **2.0.0**: it changes the database and the deployment. See _Upgrading_ below.
+## [2.1.0] — 2026-11-20
+
+### Added
+
+- **English interface.** Every text of the wiki — menus, settings, messages, e-mails, the error texts of the API, the built-in pages and the legal templates — is available in English. The _DE/EN_ button in the header switches the language for this browser (kept in the `lang` cookie, already listed in the privacy notice); _Einstellungen → Allgemein → Website → Standardsprache_ sets it for everyone else and for e-mails without a reader's choice. Unedited built-in pages (_Willkommen_, _Markdown-Anleitung_) are shown, searched and opened in the editor in the reader's language; pages people wrote stay as written. E-mails carry the right `lang` attribute.
+- **Bigger, movable mini player.** _Bild-in-Bild_ now opens a mini player at about 38 % of the window (at least 20 rem, at most 52 rem, never wider than the screen) instead of 24 rem. Drag its top bar to move it, drag the corner at the top left to resize it (right and bottom edge stay put), or use the arrow keys on either (Shift: bigger steps). It always stays inside the window — also after rotating a phone or resizing the window — and its place and size are remembered in this browser (`tidewiki:pip`, listed in the privacy notice together with `tidewiki:display`). Uploaded videos use the same mini player; the browser's own picture-in-picture is still in the video's controls.
+
+### Fixed
+
+- **Page titles of a private wiki could be read without signing in.** With _Lesen ohne Anmeldung erlauben_ off, `/w/<page>` redirected to the sign-in, but the redirect response still carried the page's title (Next renders the metadata next to the page). The title is now only computed for people who may read the page. Added an end-to-end test for page, history and editor addresses.
+- Escape no longer closes the mini player while a dialog is open or while typing in the search box or a text field.
+- The mini player no longer replays its opening animation after every drag.
+- After _Video laden_, the buttons under a YouTube or Vimeo player were centred and the player box shrank to its content in current Chromium (it now aligns block boxes too); they are right-aligned across the full width again, like under uploaded videos.
+- The font sample in _Darstellung_ is now a translation key like every other text.
+- The privacy notice now lists the browser storage entries `tidewiki:display` (size on this device) and `tidewiki:pip` (mini player).
+
+## [2.0.0] — 2026-11-19
+
+This release changes the database and the deployment. See _Upgrading to 2.0.0_ below.
 
 ### Changed — breaking
 
@@ -22,6 +40,8 @@ On its first start against the empty database the wiki imports `data/wiki.db` on
 
 ### Added
 
+- **Darstellung (appearance), with the same choices as Tidedeck.** 29 presets (Tide and its relatives, colour schemes, styles, sea and nature), 27 self-hosted fonts in groups or a font installed on the device, accent colour per theme, the default theme, a background in layers (theme grey or your own page colour that tints the content area and lines, an uploaded image — blurred and darkened — and a gradient on top, each switchable), header band colours, content-area opacity, size (grows with big screens or fixed, optionally only for one browser) and page width, and the owner's own CSS (with the password; it may not load anything from other servers). Changes show on the page at once and are saved a moment later. A page loads only the font in use. The background image counts as used, so _Unbenutzte löschen_ keeps it.
+- **Automatic Docker publishing like Tidedeck.** Every push to `main` runs the whole CI first (now also on Node 24, with a dependency audit) and only then publishes `:latest`, plus `:<version>` and `:<major>.<minor>` for a new version in `package.json`; a `v<version>` tag publishes that version again; docs-only pushes build nothing. Images carry provenance and an SBOM, the actions are pinned to exact commits, and a missing Docker Hub secret fails with a clear message.
 - **Media: delete several at once, delete all unused.** _Einstellungen → Medien_ has checkboxes (shift-click for a range) and _Unbenutzte löschen_ — every file that no page and no page in the trash shows, plus stray files on disk without an entry. The list now also says when a file is only shown in the trash or only in older versions, and the confirmation spells out what will then be missing. API: `DELETE /api/media` with `{ ids }`, `POST /api/media/unused`.
 - **Privacy notice can be switched off** like terms and imprint — for when it is published elsewhere: enter its https address and the footer, sign-up form, legal pages and video notes link there; without an address there's no link at all.
 - **Delete several pages at once.** _Seiten verwalten_ (sidebar, editors and up) lists every page as a tree with checkboxes: ticking a chapter ticks its sub-pages, shift-click selects a range, a filter narrows the list. The selection goes to the trash in one step — sub-pages first, so a chapter and its sub-pages come back together; sub-pages that weren't selected move to the top level. Editors delete their own pages, administrators any; one page that isn't allowed and nothing is deleted. API: `DELETE /api/pages` with `{ slugs }` (at most 500).
@@ -92,5 +112,5 @@ First public release.
 
 The database migrates automatically: the existing authenticator becomes a device named "Authenticator", a former "2FA required for everyone" setting turns into "required" for all three roles, and an unedited Markdown guide is replaced by the current one.
 
-[Unreleased]: ../../compare/v1.0.0...HEAD
+[2.0.0]: ../../compare/v1.0.0...v2.0.0
 [1.0.0]: ../../releases/tag/v1.0.0

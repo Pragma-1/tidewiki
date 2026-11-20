@@ -39,6 +39,10 @@ export const SETTING_DEFS = {
   legal_terms_enabled: { type: "bool", default: true },
   legal_imprint_enabled: { type: "bool", default: true },
   legal_privacy_enabled: { type: "bool", default: true },
+  // the look (JSON, checked by parseAppearance in appearance.ts) and the owner's own CSS; both are
+  // only changed through /api/appearance, never through the general settings
+  appearance: { type: "text", default: "", max: 20000 },
+  custom_css: { type: "text", default: "", max: 50000, multiline: true },
   // where the privacy notice is when it isn't published here (e.g. on the operator's main site)
   legal_privacy_url: { type: "text", default: "", max: 300, url: true },
   // backups
@@ -93,6 +97,8 @@ export type Settings = {
   legal_terms_enabled: boolean;
   legal_imprint_enabled: boolean;
   legal_privacy_enabled: boolean;
+  appearance: string;
+  custom_css: string;
   legal_privacy_url: string;
   backup_enabled: boolean;
   backup_interval_hours: number;

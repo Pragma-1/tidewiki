@@ -21,6 +21,8 @@ const C = {
 };
 
 export type MailContent = {
+  /** Language the mail is written in (for the html lang attribute: screen readers, hyphenation). */
+  lang: "de" | "en";
   site: string;
   /** Inbox preview line (hidden in the body). */
   preheader?: string;
@@ -60,7 +62,7 @@ export function renderMail(c: MailContent): { html: string; text: string } {
         : "")
     : "";
   const html = `<!doctype html>
-<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${esc(c.heading)}</title></head>
+<html lang="${c.lang === "en" ? "en" : "de"}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${esc(c.heading)}</title></head>
 <body style="margin:0;padding:0;background:${C.bg};">
 ${c.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;">${esc(c.preheader)}</div>` : ""}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};"><tr><td align="center" style="padding:28px 12px;">
